@@ -1,0 +1,645 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PaneId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitOrientation {
+    /// Side-by-side panes (left and right), separated by a vertical divider.
+    Horizontal,
+    /// Stacked panes (top and bottom), separated by a horizontal divider.
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum LayoutError {
+    #[error("Pane ID {0:?} not found in layout tree")]
+    PaneNotFound(PaneId),
+    #[error("Cannot split: tree invariant violated")]
+    InvalidSplit,
+    #[error("Cannot close last remaining pane")]
+    CannotCloseLastPane,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LayoutNode {
+    Leaf(PaneId),
+    Split {
+        orientation: SplitOrientation,
+        ratio: f64,
+        first: Box<LayoutNode>,
+        second: Box<LayoutNode>,
+    },
+}
+
+impl LayoutNode {
+    pub fn panes(&self, list: &mut Vec<PaneId>) {
+        match self {
+            LayoutNode::Leaf(id) => list.push(*id),
+            LayoutNode::Split { first, second, .. } => {
+                first.panes(list);
+                second.panes(list);
+            }
+        }
+    }
+
+    pub fn contains(&self, target: PaneId) -> bool {
+        match self {
+            LayoutNode::Leaf(id) => *id == target,
+            LayoutNode::Split { first, second, .. } => {
+                first.contains(target) || second.contains(target)
+            }
+        }
+    }
+
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            LayoutNode::Leaf(_) => 1,
+            LayoutNode::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
+        }
+    }
+
+    pub fn first_leaf(&self) -> PaneId {
+        match self {
+            LayoutNode::Leaf(id) => *id,
+            LayoutNode::Split { first, .. } => first.first_leaf(),
+        }
+    }
+
+    pub fn last_leaf(&self) -> PaneId {
+        match self {
+            LayoutNode::Leaf(id) => *id,
+            LayoutNode::Split { second, .. } => second.last_leaf(),
+        }
+    }
+
+    fn split_leaf(
+        &mut self,
+        target: PaneId,
+        orientation: SplitOrientation,
+        new_pane: PaneId,
+    ) -> Result<bool, LayoutError> {
+        match self {
+            LayoutNode::Leaf(id) if *id == target => {
+                let old_leaf = Box::new(LayoutNode::Leaf(*id));
+                let new_leaf = Box::new(LayoutNode::Leaf(new_pane));
+                *self = LayoutNode::Split {
+                    orientation,
+                    ratio: 0.5,
+                    first: old_leaf,
+                    second: new_leaf,
+                };
+                Ok(true)
+            }
+            LayoutNode::Leaf(_) => Ok(false),
+            LayoutNode::Split { first, second, .. } => {
+                if first.split_leaf(target, orientation, new_pane)? {
+                    return Ok(true);
+                }
+                second.split_leaf(target, orientation, new_pane)
+            }
+        }
+    }
+
+    fn close_leaf(&mut self, target: PaneId) -> Result<Option<PaneId>, LayoutError> {
+        match self {
+            LayoutNode::Leaf(_) => Err(LayoutError::PaneNotFound(target)),
+            LayoutNode::Split { first, second, .. } => {
+                if let LayoutNode::Leaf(id) = **first {
+                    if id == target {
+                        let focus = second.first_leaf();
+                        let promoted = (**second).clone();
+                        *self = promoted;
+                        return Ok(Some(focus));
+                    }
+                }
+                if let LayoutNode::Leaf(id) = **second {
+                    if id == target {
+                        let focus = first.last_leaf();
+                        let promoted = (**first).clone();
+                        *self = promoted;
+                        return Ok(Some(focus));
+                    }
+                }
+
+                if first.contains(target) {
+                    first.close_leaf(target)
+                } else if second.contains(target) {
+                    second.close_leaf(target)
+                } else {
+                    Err(LayoutError::PaneNotFound(target))
+                }
+            }
+        }
+    }
+
+    fn balance(&mut self) {
+        if let LayoutNode::Split {
+            ref mut ratio,
+            ref mut first,
+            ref mut second,
+            ..
+        } = self
+        {
+            first.balance();
+            second.balance();
+            let c1 = first.leaf_count() as f64;
+            let c2 = second.leaf_count() as f64;
+            *ratio = (c1 / (c1 + c2)).clamp(0.05, 0.95);
+        }
+    }
+
+    fn compute_rects(&self, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
+        match self {
+            LayoutNode::Leaf(id) => out.push((*id, rect)),
+            LayoutNode::Split {
+                orientation,
+                ratio,
+                first,
+                second,
+            } => {
+                let r = ratio.clamp(0.05, 0.95);
+                match orientation {
+                    SplitOrientation::Horizontal => {
+                        let first_rect = Rect {
+                            x: rect.x,
+                            y: rect.y,
+                            w: rect.w * r,
+                            h: rect.h,
+                        };
+                        let second_rect = Rect {
+                            x: rect.x + rect.w * r,
+                            y: rect.y,
+                            w: rect.w * (1.0 - r),
+                            h: rect.h,
+                        };
+                        first.compute_rects(first_rect, out);
+                        second.compute_rects(second_rect, out);
+                    }
+                    SplitOrientation::Vertical => {
+                        let first_rect = Rect {
+                            x: rect.x,
+                            y: rect.y,
+                            w: rect.w,
+                            h: rect.h * r,
+                        };
+                        let second_rect = Rect {
+                            x: rect.x,
+                            y: rect.y + rect.h * r,
+                            w: rect.w,
+                            h: rect.h * (1.0 - r),
+                        };
+                        first.compute_rects(first_rect, out);
+                        second.compute_rects(second_rect, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayoutTree {
+    root: Option<LayoutNode>,
+}
+
+impl LayoutTree {
+    pub fn new(initial_pane: PaneId) -> Self {
+        Self {
+            root: Some(LayoutNode::Leaf(initial_pane)),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self { root: None }
+    }
+
+    pub fn root(&self) -> Option<&LayoutNode> {
+        self.root.as_ref()
+    }
+
+    pub fn panes(&self) -> Vec<PaneId> {
+        let mut list = Vec::new();
+        if let Some(ref root) = self.root {
+            root.panes(&mut list);
+        }
+        list
+    }
+
+    pub fn contains(&self, id: PaneId) -> bool {
+        self.root.as_ref().is_some_and(|r| r.contains(id))
+    }
+
+    pub fn split(
+        &mut self,
+        target: PaneId,
+        orientation: SplitOrientation,
+        new_pane: PaneId,
+    ) -> Result<(), LayoutError> {
+        if self.contains(new_pane) {
+            return Err(LayoutError::InvalidSplit);
+        }
+        if !self.contains(target) {
+            return Err(LayoutError::PaneNotFound(target));
+        }
+
+        let Some(ref mut root) = self.root else {
+            return Err(LayoutError::PaneNotFound(target));
+        };
+
+        let found = root.split_leaf(target, orientation, new_pane)?;
+        if found {
+            Ok(())
+        } else {
+            Err(LayoutError::PaneNotFound(target))
+        }
+    }
+
+    pub fn close(&mut self, target: PaneId) -> Result<Option<PaneId>, LayoutError> {
+        if !self.contains(target) {
+            return Err(LayoutError::PaneNotFound(target));
+        }
+
+        if let Some(LayoutNode::Leaf(id)) = self.root {
+            if id == target {
+                self.root = None;
+                return Ok(None);
+            }
+        }
+
+        let Some(ref mut root) = self.root else {
+            return Err(LayoutError::PaneNotFound(target));
+        };
+
+        root.close_leaf(target)
+    }
+
+    pub fn balance(&mut self) {
+        if let Some(ref mut root) = self.root {
+            root.balance();
+        }
+    }
+
+    pub fn find_adjacent(&self, current: PaneId, direction: Direction) -> Option<PaneId> {
+        let root = self.root.as_ref()?;
+        let mut rects = Vec::new();
+        root.compute_rects(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+            },
+            &mut rects,
+        );
+
+        let current_rect = rects.iter().find(|(id, _)| *id == current)?.1;
+
+        const EPS: f64 = 1e-5;
+
+        #[derive(Debug)]
+        struct Candidate {
+            id: PaneId,
+            border_dist: f64,
+            overlap: f64,
+            center_dist: f64,
+        }
+
+        let mut candidates = Vec::new();
+
+        for (id, r) in rects {
+            if id == current {
+                continue;
+            }
+
+            match direction {
+                Direction::Right => {
+                    if r.x >= current_rect.x + current_rect.w - EPS {
+                        let border_dist = (r.x - (current_rect.x + current_rect.w)).max(0.0);
+                        let overlap = (current_rect.y + current_rect.h).min(r.y + r.h)
+                            - current_rect.y.max(r.y);
+                        let center_dist = ((r.y + r.h / 2.0)
+                            - (current_rect.y + current_rect.h / 2.0))
+                            .abs();
+                        candidates.push(Candidate {
+                            id,
+                            border_dist,
+                            overlap,
+                            center_dist,
+                        });
+                    }
+                }
+                Direction::Left => {
+                    if r.x + r.w <= current_rect.x + EPS {
+                        let border_dist = (current_rect.x - (r.x + r.w)).max(0.0);
+                        let overlap = (current_rect.y + current_rect.h).min(r.y + r.h)
+                            - current_rect.y.max(r.y);
+                        let center_dist = ((r.y + r.h / 2.0)
+                            - (current_rect.y + current_rect.h / 2.0))
+                            .abs();
+                        candidates.push(Candidate {
+                            id,
+                            border_dist,
+                            overlap,
+                            center_dist,
+                        });
+                    }
+                }
+                Direction::Down => {
+                    if r.y >= current_rect.y + current_rect.h - EPS {
+                        let border_dist = (r.y - (current_rect.y + current_rect.h)).max(0.0);
+                        let overlap = (current_rect.x + current_rect.w).min(r.x + r.w)
+                            - current_rect.x.max(r.x);
+                        let center_dist = ((r.x + r.w / 2.0)
+                            - (current_rect.x + current_rect.w / 2.0))
+                            .abs();
+                        candidates.push(Candidate {
+                            id,
+                            border_dist,
+                            overlap,
+                            center_dist,
+                        });
+                    }
+                }
+                Direction::Up => {
+                    if r.y + r.h <= current_rect.y + EPS {
+                        let border_dist = (current_rect.y - (r.y + r.h)).max(0.0);
+                        let overlap = (current_rect.x + current_rect.w).min(r.x + r.w)
+                            - current_rect.x.max(r.x);
+                        let center_dist = ((r.x + r.w / 2.0)
+                            - (current_rect.x + current_rect.w / 2.0))
+                            .abs();
+                        candidates.push(Candidate {
+                            id,
+                            border_dist,
+                            overlap,
+                            center_dist,
+                        });
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Prefer candidates with positive interval overlap along perpendicular axis
+        let has_overlapping = candidates.iter().any(|c| c.overlap > EPS);
+        if has_overlapping {
+            candidates.retain(|c| c.overlap > EPS);
+        }
+
+        // Sort by:
+        // 1. Min border distance (immediate neighbor)
+        // 2. Max overlap length
+        // 3. Min center distance
+        candidates.sort_by(|a, b| {
+            a.border_dist
+                .partial_cmp(&b.border_dist)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    b.overlap
+                        .partial_cmp(&a.overlap)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    a.center_dist
+                        .partial_cmp(&b.center_dist)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+
+        candidates.first().map(|c| c.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_layout_has_single_leaf() {
+        let tree = LayoutTree::new(PaneId(1));
+        assert_eq!(tree.panes(), vec![PaneId(1)]);
+        assert!(tree.contains(PaneId(1)));
+        assert_eq!(tree.root(), Some(&LayoutNode::Leaf(PaneId(1))));
+    }
+
+    #[test]
+    fn test_split_horizontal_and_vertical() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
+        assert!(tree.contains(PaneId(1)));
+        assert!(tree.contains(PaneId(2)));
+
+        tree.split(PaneId(2), SplitOrientation::Vertical, PaneId(3))
+            .unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2), PaneId(3)]);
+        assert!(tree.contains(PaneId(3)));
+    }
+
+    #[test]
+    fn test_split_nested_deep_tree() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        for i in 2..=8 {
+            let orientation = if i % 2 == 0 {
+                SplitOrientation::Horizontal
+            } else {
+                SplitOrientation::Vertical
+            };
+            tree.split(PaneId(i - 1), orientation, PaneId(i)).unwrap();
+        }
+        assert_eq!(tree.panes().len(), 8);
+        for i in 1..=8 {
+            assert!(tree.contains(PaneId(i)));
+        }
+    }
+
+    #[test]
+    fn test_close_leaf_promotes_sibling() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        let next = tree.close(PaneId(1)).unwrap();
+        assert_eq!(next, Some(PaneId(2)));
+        assert_eq!(tree.root(), Some(&LayoutNode::Leaf(PaneId(2))));
+        assert_eq!(tree.panes(), vec![PaneId(2)]);
+        assert!(!tree.contains(PaneId(1)));
+    }
+
+    #[test]
+    fn test_close_nested_branch_promotes_subtree() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        tree.split(PaneId(2), SplitOrientation::Vertical, PaneId(3))
+            .unwrap();
+        // Tree: Split(Horizontal, Leaf(1), Split(Vertical, Leaf(2), Leaf(3)))
+        let next = tree.close(PaneId(1)).unwrap();
+        assert!(next == Some(PaneId(2)) || next == Some(PaneId(3)));
+        assert_eq!(tree.panes(), vec![PaneId(2), PaneId(3)]);
+        assert!(!tree.contains(PaneId(1)));
+    }
+
+    #[test]
+    fn test_close_last_pane_returns_none() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        let next = tree.close(PaneId(1)).unwrap();
+        assert_eq!(next, None);
+        assert_eq!(tree.root(), None);
+        assert_eq!(tree.panes(), Vec::<PaneId>::new());
+        assert!(!tree.contains(PaneId(1)));
+        assert_eq!(
+            tree.close(PaneId(1)),
+            Err(LayoutError::PaneNotFound(PaneId(1)))
+        );
+    }
+
+    #[test]
+    fn test_directional_navigation_2x2_grid() {
+        // Grid:
+        // [ 1 ] [ 3 ]
+        // [ 2 ] [ 4 ]
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(3))
+            .unwrap();
+        tree.split(PaneId(1), SplitOrientation::Vertical, PaneId(2))
+            .unwrap();
+        tree.split(PaneId(3), SplitOrientation::Vertical, PaneId(4))
+            .unwrap();
+
+        assert_eq!(
+            tree.find_adjacent(PaneId(1), Direction::Right),
+            Some(PaneId(3))
+        );
+        assert_eq!(
+            tree.find_adjacent(PaneId(1), Direction::Down),
+            Some(PaneId(2))
+        );
+        assert_eq!(tree.find_adjacent(PaneId(1), Direction::Left), None);
+        assert_eq!(tree.find_adjacent(PaneId(1), Direction::Up), None);
+
+        assert_eq!(
+            tree.find_adjacent(PaneId(2), Direction::Right),
+            Some(PaneId(4))
+        );
+        assert_eq!(
+            tree.find_adjacent(PaneId(2), Direction::Up),
+            Some(PaneId(1))
+        );
+        assert_eq!(tree.find_adjacent(PaneId(2), Direction::Left), None);
+        assert_eq!(tree.find_adjacent(PaneId(2), Direction::Down), None);
+
+        assert_eq!(
+            tree.find_adjacent(PaneId(3), Direction::Left),
+            Some(PaneId(1))
+        );
+        assert_eq!(
+            tree.find_adjacent(PaneId(3), Direction::Down),
+            Some(PaneId(4))
+        );
+        assert_eq!(tree.find_adjacent(PaneId(3), Direction::Right), None);
+        assert_eq!(tree.find_adjacent(PaneId(3), Direction::Up), None);
+
+        assert_eq!(
+            tree.find_adjacent(PaneId(4), Direction::Left),
+            Some(PaneId(2))
+        );
+        assert_eq!(
+            tree.find_adjacent(PaneId(4), Direction::Up),
+            Some(PaneId(3))
+        );
+        assert_eq!(tree.find_adjacent(PaneId(4), Direction::Right), None);
+        assert_eq!(tree.find_adjacent(PaneId(4), Direction::Down), None);
+    }
+
+    #[test]
+    fn test_directional_navigation_asymmetrical() {
+        // Asymmetrical:
+        // [ 1 (tall) ] [ 2 (top) ]
+        // [ 1 (tall) ] [ 3 (bottom) ]
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        tree.split(PaneId(2), SplitOrientation::Vertical, PaneId(3))
+            .unwrap();
+
+        assert_eq!(
+            tree.find_adjacent(PaneId(2), Direction::Left),
+            Some(PaneId(1))
+        );
+        assert_eq!(
+            tree.find_adjacent(PaneId(3), Direction::Left),
+            Some(PaneId(1))
+        );
+        assert_eq!(
+            tree.find_adjacent(PaneId(2), Direction::Down),
+            Some(PaneId(3))
+        );
+        assert_eq!(
+            tree.find_adjacent(PaneId(3), Direction::Up),
+            Some(PaneId(2))
+        );
+
+        let right_of_1 = tree.find_adjacent(PaneId(1), Direction::Right);
+        assert!(right_of_1 == Some(PaneId(2)) || right_of_1 == Some(PaneId(3)));
+    }
+
+    #[test]
+    fn test_balance_split_ratios() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        // Artificially change ratio or add more splits
+        tree.split(PaneId(2), SplitOrientation::Horizontal, PaneId(3))
+            .unwrap();
+
+        tree.balance();
+        if let Some(LayoutNode::Split { ratio, .. }) = tree.root() {
+            // First has 1 leaf (Pane 1), second has 2 leaves (Pane 2, Pane 3)
+            // Ratio should be 1 / 3 ≈ 0.333333
+            assert!((ratio - 1.0 / 3.0).abs() < 1e-4);
+        } else {
+            panic!("Expected split root");
+        }
+    }
+
+    #[test]
+    fn test_error_conditions() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        // Target not found
+        assert_eq!(
+            tree.split(PaneId(99), SplitOrientation::Horizontal, PaneId(2)),
+            Err(LayoutError::PaneNotFound(PaneId(99)))
+        );
+        // Duplicate new pane
+        assert_eq!(
+            tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(1)),
+            Err(LayoutError::InvalidSplit)
+        );
+        // Close non-existent pane
+        assert_eq!(
+            tree.close(PaneId(99)),
+            Err(LayoutError::PaneNotFound(PaneId(99)))
+        );
+    }
+}
