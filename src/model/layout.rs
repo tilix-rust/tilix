@@ -29,10 +29,14 @@ pub enum LayoutError {
     CannotCloseLastPane,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SplitId(pub u64);
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LayoutNode {
     Leaf(PaneId),
     Split {
+        id: SplitId,
         orientation: SplitOrientation,
         ratio: f64,
         first: Box<LayoutNode>,
@@ -86,12 +90,14 @@ impl LayoutNode {
         target: PaneId,
         orientation: SplitOrientation,
         new_pane: PaneId,
+        split_id: SplitId,
     ) -> Result<bool, LayoutError> {
         match self {
             LayoutNode::Leaf(id) if *id == target => {
                 let old_leaf = Box::new(LayoutNode::Leaf(*id));
                 let new_leaf = Box::new(LayoutNode::Leaf(new_pane));
                 *self = LayoutNode::Split {
+                    id: split_id,
                     orientation,
                     ratio: 0.5,
                     first: old_leaf,
@@ -101,10 +107,51 @@ impl LayoutNode {
             }
             LayoutNode::Leaf(_) => Ok(false),
             LayoutNode::Split { first, second, .. } => {
-                if first.split_leaf(target, orientation, new_pane)? {
+                if first.split_leaf(target, orientation, new_pane, split_id)? {
                     return Ok(true);
                 }
-                second.split_leaf(target, orientation, new_pane)
+                second.split_leaf(target, orientation, new_pane, split_id)
+            }
+        }
+    }
+
+    fn set_split_ratio(&mut self, target_id: SplitId, clamped_ratio: f64) -> bool {
+        match self {
+            LayoutNode::Leaf(_) => false,
+            LayoutNode::Split {
+                id,
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                if *id == target_id {
+                    *ratio = clamped_ratio;
+                    true
+                } else {
+                    first.set_split_ratio(target_id, clamped_ratio)
+                        || second.set_split_ratio(target_id, clamped_ratio)
+                }
+            }
+        }
+    }
+
+    fn remap_ids(&mut self, next_pane: &mut u64, next_split: &mut u64) {
+        match self {
+            LayoutNode::Leaf(id) => {
+                *id = PaneId(*next_pane);
+                *next_pane += 1;
+            }
+            LayoutNode::Split {
+                id,
+                first,
+                second,
+                ..
+            } => {
+                *id = SplitId(*next_split);
+                *next_split += 1;
+                first.remap_ids(next_pane, next_split);
+                second.remap_ids(next_pane, next_split);
             }
         }
     }
@@ -165,6 +212,7 @@ impl LayoutNode {
                 ratio,
                 first,
                 second,
+                ..
             } => {
                 let r = ratio.clamp(0.05, 0.95);
                 match orientation {
@@ -217,17 +265,33 @@ pub struct Rect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutTree {
     root: Option<LayoutNode>,
+    #[serde(default = "default_next_split_id")]
+    next_split_id: u64,
+}
+
+fn default_next_split_id() -> u64 {
+    1
 }
 
 impl LayoutTree {
     pub fn new(initial_pane: PaneId) -> Self {
         Self {
             root: Some(LayoutNode::Leaf(initial_pane)),
+            next_split_id: 1,
         }
     }
 
     pub fn empty() -> Self {
-        Self { root: None }
+        Self {
+            root: None,
+            next_split_id: 1,
+        }
+    }
+
+    pub fn next_split_id(&mut self) -> SplitId {
+        let id = SplitId(self.next_split_id);
+        self.next_split_id += 1;
+        id
     }
 
     pub fn root(&self) -> Option<&LayoutNode> {
@@ -252,6 +316,17 @@ impl LayoutTree {
         orientation: SplitOrientation,
         new_pane: PaneId,
     ) -> Result<(), LayoutError> {
+        let split_id = self.next_split_id();
+        self.split_with_id(target, orientation, new_pane, split_id)
+    }
+
+    pub fn split_with_id(
+        &mut self,
+        target: PaneId,
+        orientation: SplitOrientation,
+        new_pane: PaneId,
+        split_id: SplitId,
+    ) -> Result<(), LayoutError> {
         if self.contains(new_pane) {
             return Err(LayoutError::InvalidSplit);
         }
@@ -263,12 +338,32 @@ impl LayoutTree {
             return Err(LayoutError::PaneNotFound(target));
         };
 
-        let found = root.split_leaf(target, orientation, new_pane)?;
+        if split_id.0 >= self.next_split_id {
+            self.next_split_id = split_id.0 + 1;
+        }
+
+        let found = root.split_leaf(target, orientation, new_pane, split_id)?;
         if found {
             Ok(())
         } else {
             Err(LayoutError::PaneNotFound(target))
         }
+    }
+
+    pub fn set_split_ratio(&mut self, split_id: SplitId, ratio: f64) -> bool {
+        let clamped = ratio.clamp(0.05, 0.95);
+        if let Some(ref mut root) = self.root {
+            root.set_split_ratio(split_id, clamped)
+        } else {
+            false
+        }
+    }
+
+    pub fn remap_ids(&mut self, next_pane: &mut u64, next_split: &mut u64) {
+        if let Some(ref mut root) = self.root {
+            root.remap_ids(next_pane, next_split);
+        }
+        self.next_split_id = *next_split;
     }
 
     pub fn close(&mut self, target: PaneId) -> Result<Option<PaneId>, LayoutError> {
@@ -641,5 +736,85 @@ mod tests {
             tree.close(PaneId(99)),
             Err(LayoutError::PaneNotFound(PaneId(99)))
         );
+    }
+
+    #[test]
+    fn test_split_assigns_unique_split_ids() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        tree.split(PaneId(2), SplitOrientation::Vertical, PaneId(3))
+            .unwrap();
+
+        let root = tree.root().unwrap();
+        if let LayoutNode::Split { id: s1, second, .. } = root {
+            assert_eq!(*s1, SplitId(1));
+            if let LayoutNode::Split { id: s2, .. } = &**second {
+                assert_eq!(*s2, SplitId(2));
+            } else {
+                panic!("Expected second node to be split");
+            }
+        } else {
+            panic!("Expected root to be split");
+        }
+    }
+
+    #[test]
+    fn test_set_split_ratio_updates_target_node() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        assert!(tree.set_split_ratio(SplitId(1), 0.75));
+
+        if let Some(LayoutNode::Split { ratio, .. }) = tree.root() {
+            assert!((ratio - 0.75).abs() < 1e-6);
+        } else {
+            panic!("Expected root to be split");
+        }
+
+        assert!(!tree.set_split_ratio(SplitId(999), 0.5));
+    }
+
+    #[test]
+    fn test_set_split_ratio_clamps_values() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+
+        tree.set_split_ratio(SplitId(1), 0.01);
+        if let Some(LayoutNode::Split { ratio, .. }) = tree.root() {
+            assert!((ratio - 0.05).abs() < 1e-6);
+        } else {
+            panic!("Expected root to be split");
+        }
+
+        tree.set_split_ratio(SplitId(1), 0.99);
+        if let Some(LayoutNode::Split { ratio, .. }) = tree.root() {
+            assert!((ratio - 0.95).abs() < 1e-6);
+        } else {
+            panic!("Expected root to be split");
+        }
+    }
+
+    #[test]
+    fn test_remap_ids_renumbers_panes_and_splits() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        tree.split(PaneId(2), SplitOrientation::Vertical, PaneId(3))
+            .unwrap();
+
+        let mut next_pane = 10;
+        let mut next_split = 20;
+        tree.remap_ids(&mut next_pane, &mut next_split);
+
+        assert_eq!(next_pane, 13);
+        assert_eq!(next_split, 22);
+
+        assert_eq!(tree.panes(), vec![PaneId(10), PaneId(11), PaneId(12)]);
+
+        // Next split should use updated next_split_id
+        let next_s = tree.next_split_id();
+        assert_eq!(next_s, SplitId(22));
     }
 }

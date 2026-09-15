@@ -10,6 +10,10 @@ pub struct SessionModel {
     pub layout: LayoutTree,
     pub active_pane: Option<PaneId>,
     pub sync_groups: HashMap<PaneId, SyncGroupId>,
+    #[serde(default)]
+    pub sync_input_enabled: bool,
+    #[serde(default)]
+    pub pane_sync_overrides: HashMap<PaneId, bool>,
     next_pane_id: u64,
 }
 
@@ -19,7 +23,20 @@ impl SessionModel {
             layout: LayoutTree::new(initial_pane),
             active_pane: Some(initial_pane),
             sync_groups: HashMap::new(),
+            sync_input_enabled: false,
+            pane_sync_overrides: HashMap::new(),
             next_pane_id: initial_pane.0 + 1,
+        }
+    }
+
+    pub fn from_layout(layout: LayoutTree, active_pane: PaneId, next_pane_id: u64) -> Self {
+        Self {
+            layout,
+            active_pane: Some(active_pane),
+            sync_groups: HashMap::new(),
+            sync_input_enabled: false,
+            pane_sync_overrides: HashMap::new(),
+            next_pane_id,
         }
     }
 
@@ -27,6 +44,19 @@ impl SessionModel {
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
         id
+    }
+
+    pub fn is_pane_sync_enabled(&self, pane_id: PaneId) -> bool {
+        *self.pane_sync_overrides.get(&pane_id).unwrap_or(&true)
+    }
+
+    pub fn set_pane_sync_enabled(&mut self, pane_id: PaneId, enabled: bool) {
+        self.pane_sync_overrides.insert(pane_id, enabled);
+    }
+
+    pub fn toggle_sync_input(&mut self) -> bool {
+        self.sync_input_enabled = !self.sync_input_enabled;
+        self.sync_input_enabled
     }
 
     pub fn split_pane(
@@ -51,6 +81,7 @@ impl SessionModel {
     pub fn close_pane(&mut self, id: PaneId) -> Result<Option<PaneId>, LayoutError> {
         let next_focus = self.layout.close(id)?;
         self.sync_groups.remove(&id);
+        self.pane_sync_overrides.remove(&id);
         if self.active_pane == Some(id) {
             self.active_pane = next_focus;
         }
@@ -90,5 +121,28 @@ mod tests {
         assert_eq!(session.active_pane, None);
         assert!(session.layout.panes().is_empty());
         assert_eq!(session.layout.root(), None);
+    }
+
+    #[test]
+    fn test_session_sync_model() {
+        let mut session = SessionModel::new(PaneId(1));
+        assert!(!session.sync_input_enabled);
+
+        // Toggle sync
+        assert!(session.toggle_sync_input());
+        assert!(session.sync_input_enabled);
+
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        assert!(session.is_pane_sync_enabled(PaneId(1)));
+        assert!(session.is_pane_sync_enabled(p2));
+
+        // Disable sync override on p2
+        session.set_pane_sync_enabled(p2, false);
+        assert!(!session.is_pane_sync_enabled(p2));
+        assert!(session.is_pane_sync_enabled(PaneId(1)));
+
+        // Closing p2 cleans up overrides
+        session.close_pane(p2).unwrap();
+        assert!(!session.pane_sync_overrides.contains_key(&p2));
     }
 }

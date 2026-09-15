@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -6,23 +6,31 @@ use gtk::prelude::*;
 use vte4 as vte;
 use vte::prelude::*;
 
-use crate::model::{PaneId, SplitOrientation};
+use crate::model::{ColorScheme, CursorBlinkPreference, CursorShapePreference, PaneId, Profile, SplitOrientation};
 use crate::pty::{default_env, detect_shell};
 
 type CloseCallback = Box<dyn Fn(PaneId)>;
 type SplitCallback = Box<dyn Fn(PaneId, SplitOrientation)>;
 type FocusCallback = Box<dyn Fn(PaneId)>;
+type CommitCallback = Box<dyn Fn(PaneId, &str)>;
+type TitleCallback = Box<dyn Fn(PaneId, &str)>;
+type SyncToggleCallback = Box<dyn Fn(PaneId, bool)>;
 
 #[derive(Clone)]
 pub struct TerminalPane {
     container: gtk::Box,
     header: gtk::Box,
     title_label: gtk::Label,
+    sync_btn: gtk::ToggleButton,
     terminal: vte::Terminal,
     pane_id: PaneId,
+    is_sync_enabled: Rc<Cell<bool>>,
     close_callbacks: Rc<RefCell<Vec<CloseCallback>>>,
     split_callbacks: Rc<RefCell<Vec<SplitCallback>>>,
     focus_callbacks: Rc<RefCell<Vec<FocusCallback>>>,
+    commit_callbacks: Rc<RefCell<Vec<CommitCallback>>>,
+    title_callbacks: Rc<RefCell<Vec<TitleCallback>>>,
+    sync_toggled_callbacks: Rc<RefCell<Vec<SyncToggleCallback>>>,
 }
 
 impl TerminalPane {
@@ -45,6 +53,12 @@ impl TerminalPane {
         header.append(&title_label);
 
         // Header buttons
+        let sync_btn = gtk::ToggleButton::new();
+        sync_btn.set_icon_name("input-keyboard-symbolic");
+        sync_btn.set_tooltip_text(Some("Synchronize Input"));
+        sync_btn.add_css_class("flat");
+        sync_btn.set_active(true);
+
         let split_h_btn = gtk::Button::from_icon_name("object-flip-horizontal-symbolic");
         split_h_btn.set_tooltip_text(Some("Split Right (Ctrl+Shift+R)"));
         split_h_btn.add_css_class("flat");
@@ -57,6 +71,7 @@ impl TerminalPane {
         close_btn.set_tooltip_text(Some("Close Pane (Ctrl+Shift+W)"));
         close_btn.add_css_class("flat");
 
+        header.append(&sync_btn);
         header.append(&split_h_btn);
         header.append(&split_v_btn);
         header.append(&close_btn);
@@ -70,9 +85,27 @@ impl TerminalPane {
         container.append(&header);
         container.append(&terminal);
 
+        let is_sync_enabled = Rc::new(Cell::new(true));
         let close_callbacks: Rc<RefCell<Vec<CloseCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let split_callbacks: Rc<RefCell<Vec<SplitCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let focus_callbacks: Rc<RefCell<Vec<FocusCallback>>> = Rc::new(RefCell::new(Vec::new()));
+        let commit_callbacks: Rc<RefCell<Vec<CommitCallback>>> = Rc::new(RefCell::new(Vec::new()));
+        let title_callbacks: Rc<RefCell<Vec<TitleCallback>>> = Rc::new(RefCell::new(Vec::new()));
+        let sync_toggled_callbacks: Rc<RefCell<Vec<SyncToggleCallback>>> = Rc::new(RefCell::new(Vec::new()));
+
+        // Wire sync button
+        {
+            let is_sync = Rc::clone(&is_sync_enabled);
+            let callbacks = Rc::clone(&sync_toggled_callbacks);
+            sync_btn.connect_toggled(move |btn| {
+                let active = btn.is_active();
+                is_sync.set(active);
+                let list = callbacks.borrow();
+                for cb in list.iter() {
+                    cb(pane_id, active);
+                }
+            });
+        }
 
         // Wire close button
         {
@@ -119,9 +152,14 @@ impl TerminalPane {
         // Wire window title change
         {
             let label_clone = title_label.clone();
+            let callbacks = Rc::clone(&title_callbacks);
             terminal.connect_window_title_changed(move |term| {
                 if let Some(title) = term.window_title() {
                     label_clone.set_text(&title);
+                    let list = callbacks.borrow();
+                    for cb in list.iter() {
+                        cb(pane_id, &title);
+                    }
                 }
             });
         }
@@ -137,6 +175,17 @@ impl TerminalPane {
                 }
             });
             terminal.add_controller(focus_ctrl);
+        }
+
+        // Wire commit notification (for synchronized input)
+        {
+            let callbacks = Rc::clone(&commit_callbacks);
+            terminal.connect_commit(move |_term, text, _size| {
+                let list = callbacks.borrow();
+                for cb in list.iter() {
+                    cb(pane_id, text);
+                }
+            });
         }
 
         // Spawn shell asynchronously
@@ -163,16 +212,25 @@ impl TerminalPane {
             container,
             header,
             title_label,
+            sync_btn,
             terminal,
             pane_id,
+            is_sync_enabled,
             close_callbacks,
             split_callbacks,
             focus_callbacks,
+            commit_callbacks,
+            title_callbacks,
+            sync_toggled_callbacks,
         }
     }
 
     pub fn pane_id(&self) -> PaneId {
         self.pane_id
+    }
+
+    pub fn title(&self) -> String {
+        self.title_label.text().to_string()
     }
 
     pub fn widget(&self) -> &gtk::Widget {
@@ -185,6 +243,19 @@ impl TerminalPane {
 
     pub fn header(&self) -> &gtk::Box {
         &self.header
+    }
+
+    pub fn is_sync_enabled(&self) -> bool {
+        self.is_sync_enabled.get()
+    }
+
+    pub fn set_sync_enabled(&self, enabled: bool) {
+        self.is_sync_enabled.set(enabled);
+        self.sync_btn.set_active(enabled);
+    }
+
+    pub fn feed_child(&self, data: &[u8]) {
+        self.terminal.feed_child(data);
     }
 
     pub fn set_active(&self, active: bool) {
@@ -213,5 +284,89 @@ impl TerminalPane {
 
     pub fn connect_focus<F: Fn(PaneId) + 'static>(&self, f: F) {
         self.focus_callbacks.borrow_mut().push(Box::new(f));
+    }
+
+    pub fn connect_commit<F: Fn(PaneId, &str) + 'static>(&self, f: F) {
+        self.commit_callbacks.borrow_mut().push(Box::new(f));
+    }
+
+    pub fn connect_title_changed<F: Fn(PaneId, &str) + 'static>(&self, f: F) {
+        self.title_callbacks.borrow_mut().push(Box::new(f));
+    }
+
+    pub fn connect_sync_toggled<F: Fn(PaneId, bool) + 'static>(&self, f: F) {
+        self.sync_toggled_callbacks.borrow_mut().push(Box::new(f));
+    }
+
+    pub fn apply_color_scheme(&self, scheme: &ColorScheme) {
+        let to_gdk = |c: &crate::model::RgbColor| {
+            gtk::gdk::RGBA::builder()
+                .red(c.red as f32)
+                .green(c.green as f32)
+                .blue(c.blue as f32)
+                .alpha(c.alpha as f32)
+                .build()
+        };
+
+        let fg = to_gdk(&scheme.foreground);
+        let bg = to_gdk(&scheme.background);
+        let palette_gdk: Vec<gtk::gdk::RGBA> = scheme.palette.iter().map(to_gdk).collect();
+        let palette_refs: Vec<&gtk::gdk::RGBA> = palette_gdk.iter().collect();
+
+        self.terminal
+            .set_colors(Some(&fg), Some(&bg), &palette_refs);
+
+        if let Some(ref c) = scheme.cursor {
+            let cursor_rgba = to_gdk(c);
+            self.terminal.set_color_cursor(Some(&cursor_rgba));
+        } else {
+            self.terminal.set_color_cursor(None);
+        }
+
+        if let Some(ref c) = scheme.cursor_foreground {
+            let cursor_fg_rgba = to_gdk(c);
+            self.terminal
+                .set_color_cursor_foreground(Some(&cursor_fg_rgba));
+        } else {
+            self.terminal.set_color_cursor_foreground(None);
+        }
+    }
+
+    pub fn apply_profile(&self, profile: &Profile) {
+        self.apply_color_scheme(&profile.color_scheme);
+
+        if let Some(ref font_name) = profile.font {
+            let font_desc = gtk::pango::FontDescription::from_string(font_name);
+            self.terminal.set_font(Some(&font_desc));
+        }
+
+        if let Some(lines) = profile.scrollback_lines {
+            self.terminal.set_scrollback_lines(lines);
+        }
+
+        match profile.cursor_shape {
+            CursorShapePreference::Block => {
+                self.terminal.set_cursor_shape(vte::CursorShape::Block);
+            }
+            CursorShapePreference::IBeam => {
+                self.terminal.set_cursor_shape(vte::CursorShape::Ibeam);
+            }
+            CursorShapePreference::Underline => {
+                self.terminal.set_cursor_shape(vte::CursorShape::Underline);
+            }
+        }
+
+        match profile.cursor_blink {
+            CursorBlinkPreference::System => {
+                self.terminal
+                    .set_cursor_blink_mode(vte::CursorBlinkMode::System);
+            }
+            CursorBlinkPreference::On => {
+                self.terminal.set_cursor_blink_mode(vte::CursorBlinkMode::On);
+            }
+            CursorBlinkPreference::Off => {
+                self.terminal.set_cursor_blink_mode(vte::CursorBlinkMode::Off);
+            }
+        }
     }
 }
