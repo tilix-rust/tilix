@@ -29,6 +29,7 @@ pub struct TerminalPane {
     pane_id: PaneId,
     current_directory: Rc<RefCell<Option<PathBuf>>>,
     is_sync_enabled: Rc<Cell<bool>>,
+    is_closing: Rc<Cell<bool>>,
     close_callbacks: Rc<RefCell<Vec<CloseCallback>>>,
     split_callbacks: Rc<RefCell<Vec<SplitCallback>>>,
     focus_callbacks: Rc<RefCell<Vec<FocusCallback>>>,
@@ -93,6 +94,7 @@ impl TerminalPane {
 
         let current_directory = Rc::new(RefCell::new(initial_directory.map(|p| p.to_path_buf())));
         let is_sync_enabled = Rc::new(Cell::new(true));
+        let is_closing = Rc::new(Cell::new(false));
         let close_callbacks: Rc<RefCell<Vec<CloseCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let split_callbacks: Rc<RefCell<Vec<SplitCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let focus_callbacks: Rc<RefCell<Vec<FocusCallback>>> = Rc::new(RefCell::new(Vec::new()));
@@ -109,9 +111,10 @@ impl TerminalPane {
             sync_btn.connect_toggled(move |btn| {
                 let active = btn.is_active();
                 is_sync.set(active);
-                let list = callbacks.borrow();
-                for cb in list.iter() {
-                    cb(pane_id, active);
+                if let Ok(list) = callbacks.try_borrow() {
+                    for cb in list.iter() {
+                        cb(pane_id, active);
+                    }
                 }
             });
         }
@@ -120,9 +123,10 @@ impl TerminalPane {
         {
             let callbacks = Rc::clone(&close_callbacks);
             close_btn.connect_clicked(move |_| {
-                let list = callbacks.borrow();
-                for cb in list.iter() {
-                    cb(pane_id);
+                if let Ok(list) = callbacks.try_borrow() {
+                    for cb in list.iter() {
+                        cb(pane_id);
+                    }
                 }
             });
         }
@@ -131,18 +135,20 @@ impl TerminalPane {
         {
             let callbacks = Rc::clone(&split_callbacks);
             split_h_btn.connect_clicked(move |_| {
-                let list = callbacks.borrow();
-                for cb in list.iter() {
-                    cb(pane_id, SplitOrientation::Horizontal);
+                if let Ok(list) = callbacks.try_borrow() {
+                    for cb in list.iter() {
+                        cb(pane_id, SplitOrientation::Horizontal);
+                    }
                 }
             });
         }
         {
             let callbacks = Rc::clone(&split_callbacks);
             split_v_btn.connect_clicked(move |_| {
-                let list = callbacks.borrow();
-                for cb in list.iter() {
-                    cb(pane_id, SplitOrientation::Vertical);
+                if let Ok(list) = callbacks.try_borrow() {
+                    for cb in list.iter() {
+                        cb(pane_id, SplitOrientation::Vertical);
+                    }
                 }
             });
         }
@@ -151,14 +157,20 @@ impl TerminalPane {
         {
             let close_cbs = Rc::clone(&close_callbacks);
             let exit_cbs = Rc::clone(&child_exit_callbacks);
+            let is_closing = Rc::clone(&is_closing);
             terminal.connect_child_exited(move |_term, status| {
-                let exit_list = exit_cbs.borrow();
-                for cb in exit_list.iter() {
-                    cb(pane_id, status);
+                if is_closing.get() {
+                    return;
                 }
-                let list = close_cbs.borrow();
-                for cb in list.iter() {
-                    cb(pane_id);
+                if let Ok(exit_list) = exit_cbs.try_borrow() {
+                    for cb in exit_list.iter() {
+                        cb(pane_id, status);
+                    }
+                }
+                if let Ok(list) = close_cbs.try_borrow() {
+                    for cb in list.iter() {
+                        cb(pane_id);
+                    }
                 }
             });
         }
@@ -166,10 +178,15 @@ impl TerminalPane {
         // Wire bell
         {
             let callbacks = Rc::clone(&bell_callbacks);
+            let is_closing = Rc::clone(&is_closing);
             terminal.connect_bell(move |_term| {
-                let list = callbacks.borrow();
-                for cb in list.iter() {
-                    cb(pane_id);
+                if is_closing.get() {
+                    return;
+                }
+                if let Ok(list) = callbacks.try_borrow() {
+                    for cb in list.iter() {
+                        cb(pane_id);
+                    }
                 }
             });
         }
@@ -180,7 +197,9 @@ impl TerminalPane {
             terminal.connect_current_directory_uri_changed(move |term| {
                 if let Some(uri) = term.current_directory_uri() {
                     if let Some(path) = parse_osc7_uri(&uri) {
-                        *cwd_clone.borrow_mut() = Some(path);
+                        if let Ok(mut cwd) = cwd_clone.try_borrow_mut() {
+                            *cwd = Some(path);
+                        }
                     }
                 }
             });
@@ -193,9 +212,10 @@ impl TerminalPane {
             terminal.connect_window_title_changed(move |term| {
                 if let Some(title) = term.window_title() {
                     label_clone.set_text(&title);
-                    let list = callbacks.borrow();
-                    for cb in list.iter() {
-                        cb(pane_id, &title);
+                    if let Ok(list) = callbacks.try_borrow() {
+                        for cb in list.iter() {
+                            cb(pane_id, &title);
+                        }
                     }
                 }
             });
@@ -206,9 +226,10 @@ impl TerminalPane {
             let callbacks = Rc::clone(&focus_callbacks);
             let focus_ctrl = gtk::EventControllerFocus::new();
             focus_ctrl.connect_enter(move |_| {
-                let list = callbacks.borrow();
-                for cb in list.iter() {
-                    cb(pane_id);
+                if let Ok(list) = callbacks.try_borrow() {
+                    for cb in list.iter() {
+                        cb(pane_id);
+                    }
                 }
             });
             terminal.add_controller(focus_ctrl);
@@ -218,9 +239,10 @@ impl TerminalPane {
         {
             let callbacks = Rc::clone(&commit_callbacks);
             terminal.connect_commit(move |_term, text, _size| {
-                let list = callbacks.borrow();
-                for cb in list.iter() {
-                    cb(pane_id, text);
+                if let Ok(list) = callbacks.try_borrow() {
+                    for cb in list.iter() {
+                        cb(pane_id, text);
+                    }
                 }
             });
         }
@@ -255,6 +277,7 @@ impl TerminalPane {
             pane_id,
             current_directory,
             is_sync_enabled,
+            is_closing,
             close_callbacks,
             split_callbacks,
             focus_callbacks,
@@ -272,6 +295,18 @@ impl TerminalPane {
 
     pub fn title(&self) -> String {
         self.title_label.text().to_string()
+    }
+
+    pub fn title_label(&self) -> &gtk::Label {
+        &self.title_label
+    }
+
+    pub fn is_closing(&self) -> bool {
+        self.is_closing.get()
+    }
+
+    pub fn close(&self) {
+        self.is_closing.set(true);
     }
 
     pub fn widget(&self) -> &gtk::Widget {

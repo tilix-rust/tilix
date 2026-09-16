@@ -304,7 +304,10 @@ impl TilixWindow {
         self.tab_view.connect_close_page(move |tv, page| {
             let child = page.child();
             tv.close_page_finish(page, true);
-            sessions_clone.borrow_mut().remove(page);
+            let session = sessions_clone.borrow_mut().remove(page);
+            if let Some(session) = session {
+                session.borrow().close();
+            }
             WIDGET_TO_SESSION.with(|m| m.borrow_mut().remove(&child));
 
             if tv.n_pages() == 0 {

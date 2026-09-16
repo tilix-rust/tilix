@@ -76,7 +76,8 @@ impl SessionView {
         let model_c = Rc::clone(&session.model);
         let container_c = session.container.clone();
         *session.swap_handler.borrow_mut() = Some(Box::new(move |src, dest| {
-            if model_c.borrow_mut().layout.swap_panes(src, dest).is_ok() {
+            let swapped = model_c.borrow_mut().layout.swap_panes(src, dest).is_ok();
+            if swapped {
                 Self::rebuild_projection_with(&container_c, &panes_c, &model_c);
             }
         }));
@@ -122,36 +123,46 @@ impl SessionView {
         pane.setup_drag_source();
         let swap_cb = Rc::clone(swap_handler);
         pane.setup_drop_target(move |src, dest| {
-            if let Some(ref cb) = *swap_cb.borrow() {
-                cb(src, dest);
+            if let Ok(cb_ref) = swap_cb.try_borrow() {
+                if let Some(ref cb) = *cb_ref {
+                    cb(src, dest);
+                }
             }
         });
 
         let handler = Rc::clone(action_handler);
         pane.connect_close(move |p_id| {
-            if let Some(cb) = handler.borrow().as_ref() {
-                cb(SessionAction::Close(p_id));
+            if let Ok(h) = handler.try_borrow() {
+                if let Some(cb) = h.as_ref() {
+                    cb(SessionAction::Close(p_id));
+                }
             }
         });
 
         let handler_split = Rc::clone(action_handler);
         pane.connect_split(move |p_id, orient| {
-            if let Some(cb) = handler_split.borrow().as_ref() {
-                cb(SessionAction::Split(p_id, orient));
+            if let Ok(h) = handler_split.try_borrow() {
+                if let Some(cb) = h.as_ref() {
+                    cb(SessionAction::Split(p_id, orient));
+                }
             }
         });
 
         let handler_focus = Rc::clone(action_handler);
         pane.connect_focus(move |p_id| {
-            if let Some(cb) = handler_focus.borrow().as_ref() {
-                cb(SessionAction::Focus(p_id));
+            if let Ok(h) = handler_focus.try_borrow() {
+                if let Some(cb) = h.as_ref() {
+                    cb(SessionAction::Focus(p_id));
+                }
             }
         });
 
         // Sync toggle callback: update model
         let model_sync = Rc::clone(model);
         pane.connect_sync_toggled(move |p_id, enabled| {
-            model_sync.borrow_mut().set_pane_sync_enabled(p_id, enabled);
+            if let Ok(mut m) = model_sync.try_borrow_mut() {
+                m.set_pane_sync_enabled(p_id, enabled);
+            }
         });
 
         // Input broadcasting: commit callback
@@ -160,11 +171,11 @@ impl SessionView {
         let model_commit = Rc::clone(model);
         pane.connect_commit(move |sender_id, text| {
             let Some(panes_rc) = panes_commit.upgrade() else { return; };
-            let model = model_commit.borrow();
+            let Ok(model) = model_commit.try_borrow() else { return; };
             if !model.sync_input_enabled {
                 return;
             }
-            let panes = panes_rc.borrow();
+            let Ok(panes) = panes_rc.try_borrow() else { return; };
             let sender_sync = panes
                 .get(&sender_id)
                 .map(|p| p.is_sync_enabled())
@@ -183,25 +194,31 @@ impl SessionView {
         let model_title = Rc::clone(model);
         let title_cb = Rc::clone(title_changed_callback);
         pane.connect_title_changed(move |p_id, title| {
-            if model_title.borrow().active_pane == Some(p_id) {
-                if let Some(ref cb) = *title_cb.borrow() {
-                    cb(title);
+            if let Ok(model) = model_title.try_borrow() {
+                if model.active_pane == Some(p_id) {
+                    if let Ok(cb_ref) = title_cb.try_borrow() {
+                        if let Some(ref cb) = *cb_ref {
+                            cb(title);
+                        }
+                    }
                 }
             }
         });
 
         // Bell notification
         let model_bell = Rc::clone(model);
-        let panes_bell = panes_weak.clone();
+        let title_label_bell = pane.title_label().downgrade();
         pane.connect_bell(move |p_id| {
-            let is_active = model_bell.borrow().active_pane == Some(p_id);
+            let is_active = model_bell
+                .try_borrow()
+                .map(|m| m.active_pane == Some(p_id))
+                .unwrap_or(false);
             let cfg = crate::model::AppConfig::load();
             if cfg.notifications_enabled && cfg.bell_notifications && !is_active {
-                let title = if let Some(panes) = panes_bell.upgrade() {
-                    panes.borrow().get(&p_id).map(|p| p.title()).unwrap_or_else(|| "Terminal".to_string())
-                } else {
-                    "Terminal".to_string()
-                };
+                let title = title_label_bell
+                    .upgrade()
+                    .map(|l| l.text().to_string())
+                    .unwrap_or_else(|| "Terminal".to_string());
                 if let Some(app) = gio::Application::default().and_then(|a| a.downcast::<adw::Application>().ok()) {
                     crate::ui::notifications::NotificationService::notify_bell(&app, &title);
                 }
@@ -210,16 +227,18 @@ impl SessionView {
 
         // Process exit notification
         let model_exit = Rc::clone(model);
-        let panes_exit = panes_weak.clone();
+        let title_label_exit = pane.title_label().downgrade();
         pane.connect_child_exited(move |p_id, status| {
-            let is_active = model_exit.borrow().active_pane == Some(p_id);
+            let is_active = model_exit
+                .try_borrow()
+                .map(|m| m.active_pane == Some(p_id))
+                .unwrap_or(false);
             let cfg = crate::model::AppConfig::load();
             if cfg.notifications_enabled && cfg.process_exit_notifications && !is_active {
-                let title = if let Some(panes) = panes_exit.upgrade() {
-                    panes.borrow().get(&p_id).map(|p| p.title()).unwrap_or_else(|| "Terminal".to_string())
-                } else {
-                    "Terminal".to_string()
-                };
+                let title = title_label_exit
+                    .upgrade()
+                    .map(|l| l.text().to_string())
+                    .unwrap_or_else(|| "Terminal".to_string());
                 if let Some(app) = gio::Application::default().and_then(|a| a.downcast::<adw::Application>().ok()) {
                     crate::ui::notifications::NotificationService::notify_process_exit(&app, &title, status);
                 }
@@ -257,10 +276,32 @@ impl SessionView {
         self.panes.borrow().is_empty()
     }
 
+    fn detach_widget(w: &gtk::Widget) {
+        if let Some(parent) = w.parent() {
+            if let Ok(paned) = parent.downcast::<gtk::Paned>() {
+                if paned.start_child().as_ref() == Some(w) {
+                    paned.set_start_child(None::<&gtk::Widget>);
+                } else if paned.end_child().as_ref() == Some(w) {
+                    paned.set_end_child(None::<&gtk::Widget>);
+                } else {
+                    w.unparent();
+                }
+            } else {
+                w.unparent();
+            }
+        }
+    }
+
     pub fn reset(&self) {
         let initial_pane_id = PaneId(1);
         *self.model.borrow_mut() = SessionModel::new(initial_pane_id);
-        self.panes.borrow_mut().clear();
+        let old_panes: Vec<TerminalPane> = self.panes.borrow_mut().drain().map(|(_, p)| p).collect();
+        for p in &old_panes {
+            p.close();
+            let w = p.widget();
+            Self::detach_widget(w);
+        }
+        drop(old_panes);
         let pane = Self::create_pane(
             initial_pane_id,
             None,
@@ -272,6 +313,15 @@ impl SessionView {
         );
         self.panes.borrow_mut().insert(initial_pane_id, pane);
         self.rebuild_projection();
+    }
+
+    pub fn close(&self) {
+        let old_panes: Vec<TerminalPane> = self.panes.borrow_mut().drain().map(|(_, p)| p).collect();
+        for p in &old_panes {
+            p.close();
+            let w = p.widget();
+            Self::detach_widget(w);
+        }
     }
 
     pub fn pane_count(&self) -> usize {
@@ -331,7 +381,8 @@ impl SessionView {
     }
 
     pub fn swap_panes(&self, a: PaneId, b: PaneId) {
-        if self.model.borrow_mut().layout.swap_panes(a, b).is_ok() {
+        let swapped = self.model.borrow_mut().layout.swap_panes(a, b).is_ok();
+        if swapped {
             self.rebuild_projection();
         }
     }
@@ -389,16 +440,17 @@ impl SessionView {
     }
 
     pub fn close_pane(&self, id: PaneId) {
-        if !self.panes.borrow().contains_key(&id) {
+        let has_pane = self.panes.borrow().contains_key(&id);
+        if !has_pane {
             return;
         }
 
         if self.model.borrow_mut().close_pane(id).is_ok() {
-            if let Some(pane) = self.panes.borrow_mut().remove(&id) {
+            let pane = self.panes.borrow_mut().remove(&id);
+            if let Some(pane) = pane {
+                pane.close();
                 let w = pane.widget();
-                if w.parent().is_some() {
-                    w.unparent();
-                }
+                Self::detach_widget(w);
             }
             self.rebuild_projection();
         }
@@ -437,9 +489,7 @@ impl SessionView {
             LayoutNode::Leaf(id) => {
                 if let Some(pane) = panes.get(id) {
                     let w = pane.widget();
-                    if w.parent().is_some() {
-                        w.unparent();
-                    }
+                    Self::detach_widget(w);
                     w.clone()
                 } else {
                     gtk::Box::new(gtk::Orientation::Vertical, 0).upcast()
@@ -491,7 +541,9 @@ impl SessionView {
                     };
                     if len > 0 {
                         let ratio = (p.position() as f64 / len as f64).clamp(0.05, 0.95);
-                        model_clone.borrow_mut().layout.set_split_ratio(split_id, ratio);
+                        if let Ok(mut m) = model_clone.try_borrow_mut() {
+                            m.layout.set_split_ratio(split_id, ratio);
+                        }
                     }
                 });
 
@@ -508,13 +560,11 @@ impl SessionView {
         let panes_b = panes.borrow();
         for pane in panes_b.values() {
             let w = pane.widget();
-            if w.parent().is_some() {
-                w.unparent();
-            }
+            Self::detach_widget(w);
         }
 
         while let Some(child) = container.first_child() {
-            child.unparent();
+            Self::detach_widget(&child);
         }
 
         let model_b = model.borrow();
@@ -546,5 +596,33 @@ impl SessionView {
 impl Default for SessionView {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_view_close_pane_and_reset_no_panic() {
+        if gtk::init().is_err() {
+            return;
+        }
+
+        let session = SessionView::new();
+        assert_eq!(session.pane_count(), 1);
+        let active_id = session.active_pane_id().unwrap();
+
+        session.split_active(SplitOrientation::Horizontal);
+        assert_eq!(session.pane_count(), 2);
+
+        session.close_pane(active_id);
+        assert_eq!(session.pane_count(), 1);
+
+        session.reset();
+        assert_eq!(session.pane_count(), 1);
+
+        session.close();
+        assert!(session.is_empty());
     }
 }
