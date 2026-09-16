@@ -1,0 +1,17 @@
+# bash completion for tilix
+
+_tilix() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    opts="-h --help -v --version -p --preferences --quake --quake-toggle"
+
+    if [[ ${cur} == -* ]] ; then
+        COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+        return 0
+    fi
+}
+
+complete -F _tilix tilix
+complete -F _tilix tilix-rust

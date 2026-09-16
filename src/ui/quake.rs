@@ -5,7 +5,7 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use crate::ui::session_view::SessionView;
+use crate::ui::session_view::{SessionAction, SessionView};
 
 #[derive(Clone)]
 pub struct TilixQuakeWindow {
@@ -23,6 +23,34 @@ impl TilixQuakeWindow {
 
         let session_view = Rc::new(RefCell::new(SessionView::new()));
         window.set_content(Some(session_view.borrow().widget()));
+
+        let session_weak = Rc::downgrade(&session_view);
+        let window_weak = window.downgrade();
+        session_view.borrow().set_action_handler(move |action| {
+            let s_weak = session_weak.clone();
+            let w_weak = window_weak.clone();
+            glib::idle_add_local_once(move || {
+                let Some(session) = s_weak.upgrade() else { return; };
+                match action {
+                    SessionAction::Split(id, orientation) => {
+                        session.borrow_mut().set_active_pane(id);
+                        session.borrow_mut().split_active(orientation);
+                    }
+                    SessionAction::Close(id) => {
+                        session.borrow_mut().close_pane(id);
+                        if session.borrow().is_empty() {
+                            if let Some(win) = w_weak.upgrade() {
+                                win.set_visible(false);
+                            }
+                            session.borrow_mut().reset();
+                        }
+                    }
+                    SessionAction::Focus(id) => {
+                        session.borrow_mut().set_active_pane(id);
+                    }
+                }
+            });
+        });
 
         Self {
             window,

@@ -156,9 +156,10 @@ impl SessionView {
 
         // Input broadcasting: commit callback
         let panes_weak = Rc::downgrade(panes);
+        let panes_commit = panes_weak.clone();
         let model_commit = Rc::clone(model);
         pane.connect_commit(move |sender_id, text| {
-            let Some(panes_rc) = panes_weak.upgrade() else { return; };
+            let Some(panes_rc) = panes_commit.upgrade() else { return; };
             let model = model_commit.borrow();
             if !model.sync_input_enabled {
                 return;
@@ -191,26 +192,36 @@ impl SessionView {
 
         // Bell notification
         let model_bell = Rc::clone(model);
-        let title_bell = pane.title();
+        let panes_bell = panes_weak.clone();
         pane.connect_bell(move |p_id| {
             let is_active = model_bell.borrow().active_pane == Some(p_id);
             let cfg = crate::model::AppConfig::load();
             if cfg.notifications_enabled && cfg.bell_notifications && !is_active {
+                let title = if let Some(panes) = panes_bell.upgrade() {
+                    panes.borrow().get(&p_id).map(|p| p.title()).unwrap_or_else(|| "Terminal".to_string())
+                } else {
+                    "Terminal".to_string()
+                };
                 if let Some(app) = gio::Application::default().and_then(|a| a.downcast::<adw::Application>().ok()) {
-                    crate::ui::notifications::NotificationService::notify_bell(&app, &title_bell);
+                    crate::ui::notifications::NotificationService::notify_bell(&app, &title);
                 }
             }
         });
 
         // Process exit notification
         let model_exit = Rc::clone(model);
-        let title_exit = pane.title();
+        let panes_exit = panes_weak.clone();
         pane.connect_child_exited(move |p_id, status| {
             let is_active = model_exit.borrow().active_pane == Some(p_id);
             let cfg = crate::model::AppConfig::load();
             if cfg.notifications_enabled && cfg.process_exit_notifications && !is_active {
+                let title = if let Some(panes) = panes_exit.upgrade() {
+                    panes.borrow().get(&p_id).map(|p| p.title()).unwrap_or_else(|| "Terminal".to_string())
+                } else {
+                    "Terminal".to_string()
+                };
                 if let Some(app) = gio::Application::default().and_then(|a| a.downcast::<adw::Application>().ok()) {
-                    crate::ui::notifications::NotificationService::notify_process_exit(&app, &title_exit, status);
+                    crate::ui::notifications::NotificationService::notify_process_exit(&app, &title, status);
                 }
             }
         });
@@ -244,6 +255,23 @@ impl SessionView {
 
     pub fn is_empty(&self) -> bool {
         self.panes.borrow().is_empty()
+    }
+
+    pub fn reset(&self) {
+        let initial_pane_id = PaneId(1);
+        *self.model.borrow_mut() = SessionModel::new(initial_pane_id);
+        self.panes.borrow_mut().clear();
+        let pane = Self::create_pane(
+            initial_pane_id,
+            None,
+            &self.panes,
+            &self.model,
+            &self.action_handler,
+            &self.title_changed_callback,
+            &self.swap_handler,
+        );
+        self.panes.borrow_mut().insert(initial_pane_id, pane);
+        self.rebuild_projection();
     }
 
     pub fn pane_count(&self) -> usize {

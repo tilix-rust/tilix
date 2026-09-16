@@ -1,0 +1,8 @@
+#compdef tilix tilix-rust
+
+_arguments -s \
+    '(-h --help)'{-h,--help}'[Show help options]' \
+    '(-v --version)'{-v,--version}'[Show version information]' \
+    '(-p --preferences)'{-p,--preferences}'[Open Preferences dialog]' \
+    '--quake[Launch or present Quake window]' \
+    '--quake-toggle[Toggle Quake window visibility]'

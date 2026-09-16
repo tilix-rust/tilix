@@ -1,0 +1,25 @@
+[Desktop Entry]
+Name=Tilix
+Comment=A tiling terminal emulator for Linux using GTK4
+GenericName=Terminal Emulator
+Exec=tilix
+Icon=com.github.tilix_rust
+Terminal=false
+Type=Application
+Categories=GNOME;GTK;System;TerminalEmulator;
+StartupNotify=true
+StartupWMClass=com.github.tilix_rust
+Keywords=terminal;prompt;command;commandline;tiling;quake;vte;
+Actions=NewWindow;Quake;Preferences;
+
+[Desktop Action NewWindow]
+Name=New Window
+Exec=tilix
+
+[Desktop Action Quake]
+Name=Toggle Quake Window
+Exec=tilix --quake-toggle
+
+[Desktop Action Preferences]
+Name=Preferences
+Exec=tilix --preferences

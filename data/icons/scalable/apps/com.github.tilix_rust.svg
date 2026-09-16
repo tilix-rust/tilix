@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="base-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3d3846"/>
+      <stop offset="100%" stop-color="#241f31"/>
+    </linearGradient>
+    <linearGradient id="pane-left" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e1e1e"/>
+      <stop offset="100%" stop-color="#181818"/>
+    </linearGradient>
+    <linearGradient id="pane-right" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#282828"/>
+      <stop offset="100%" stop-color="#1f1f1f"/>
+    </linearGradient>
+    <linearGradient id="accent-blue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3584e4"/>
+      <stop offset="100%" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="accent-green" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#33d17a"/>
+      <stop offset="100%" stop-color="#26a269"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- App base plate with shadow -->
+  <rect x="12" y="14" width="104" height="100" rx="16" ry="16" fill="url(#base-bg)" filter="url(#shadow)" stroke="#484354" stroke-width="1.5"/>
+
+  <!-- Top window title bar dots -->
+  <circle cx="24" cy="24" r="3.5" fill="#ed333b"/>
+  <circle cx="34" cy="24" r="3.5" fill="#f6d32d"/>
+  <circle cx="44" cy="24" r="3.5" fill="#33d17a"/>
+
+  <!-- Tiling Pane Left (Vertical Split) -->
+  <rect x="18" y="34" width="42" height="72" rx="4" ry="4" fill="url(#pane-left)" stroke="#383838" stroke-width="1"/>
+  <!-- Shell prompt symbol in Left Pane -->
+  <path d="M 24 48 L 32 54 L 24 60" fill="none" stroke="url(#accent-blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="36" y1="60" x2="46" y2="60" stroke="#deddda" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Tiling Pane Right-Top (Horizontal Split) -->
+  <rect x="66" y="34" width="44" height="33" rx="4" ry="4" fill="url(#pane-right)" stroke="#383838" stroke-width="1"/>
+  <!-- Shell prompt symbol in Right-Top Pane -->
+  <path d="M 72 44 L 78 48.5 L 72 53" fill="none" stroke="url(#accent-green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="82" y1="53" x2="90" y2="53" stroke="#9a9996" stroke-width="1.5" stroke-linecap="round"/>
+
+  <!-- Tiling Pane Right-Bottom (Horizontal Split) -->
+  <rect x="66" y="73" width="44" height="33" rx="4" ry="4" fill="url(#pane-left)" stroke="#383838" stroke-width="1"/>
+  <!-- Code lines in Right-Bottom Pane -->
+  <line x1="72" y1="83" x2="96" y2="83" stroke="#62a0ea" stroke-width="2" stroke-linecap="round"/>
+  <line x1="72" y1="90" x2="88" y2="90" stroke="#f6d32d" stroke-width="2" stroke-linecap="round"/>
+  <line x1="72" y1="97" x2="82" y2="97" stroke="#77767b" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Split Divider Lines (accentuating tiling layout) -->
+  <line x1="63" y1="34" x2="63" y2="106" stroke="#3584e4" stroke-width="1.5" stroke-opacity="0.8"/>
+  <line x1="66" y1="70" x2="110" y2="70" stroke="#3584e4" stroke-width="1.5" stroke-opacity="0.8"/>
+</svg>

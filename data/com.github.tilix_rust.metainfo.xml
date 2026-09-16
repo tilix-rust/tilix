@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.tilix_rust</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MPL-2.0</project_license>
+  <name>Tilix</name>
+  <summary>A modern tiling terminal emulator written in Rust and GTK4</summary>
+  <description>
+    <p>
+      Tilix is an advanced GTK4 and Libadwaita tiling terminal emulator designed for Linux.
+      Reimplemented in Rust for safety, reliability, and modern desktop compatibility, Tilix
+      empowers developers and system administrators to arrange multiple terminal sessions in
+      flexible splits, synchronize keystrokes across panes, and summon a top-docked Quake drop-down
+      terminal seamlessly under Wayland.
+    </p>
+    <p>Key Features:</p>
+    <ul>
+      <li>Flexible horizontal and vertical tiling layouts with dynamic ratio adjustment.</li>
+      <li>Multi-session tab support with automatic tab-bar autohide and cross-window detachment.</li>
+      <li>Synchronized input broadcasting across terminal panes.</li>
+      <li>Native Wayland Quake drop-down mode via single-instance D-Bus IPC.</li>
+      <li>OSC 7 current working directory inheritance on splits and tabs.</li>
+      <li>Interactive preferences with real-time palette and font reconfiguration.</li>
+      <li>Native Arch Linux and Flatpak distribution with zero legacy D compiler dependencies.</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">com.github.tilix_rust.desktop</launchable>
+  <url type="homepage">https://github.com/tilix-rust/tilix</url>
+  <url type="bugtracker">https://github.com/tilix-rust/tilix/issues</url>
+  <provides>
+    <binary>tilix</binary>
+  </provides>
+  <developer id="io.github.tilix_rust">
+    <name>The Tilix Rust Project</name>
+  </developer>
+  <releases>
+    <release version="0.1.0" date="2026-09-16">
+      <description>
+        <p>Initial stable release of the Rust Tilix rewrite featuring GTK4, Libadwaita, Wayland Quake mode, synchronized typing, and native packaging.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

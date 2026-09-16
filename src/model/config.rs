@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::Profile;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub default_profile: Profile,
     pub quake_height_percent: u32,
@@ -99,5 +100,23 @@ mod tests {
         assert_eq!(config, loaded);
 
         let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_app_config_deserialize_partial_json() {
+        let partial_json = r#"{"notifications_enabled": false}"#;
+        let deserialized = AppConfig::from_json(partial_json).expect("deserialize partial json should succeed");
+        let expected = AppConfig {
+            notifications_enabled: false,
+            ..Default::default()
+        };
+        assert_eq!(deserialized, expected);
+    }
+
+    #[test]
+    fn test_app_config_deserialize_empty_json() {
+        let empty_json = "{}";
+        let deserialized = AppConfig::from_json(empty_json).expect("deserialize empty json should succeed");
+        assert_eq!(deserialized, AppConfig::default());
     }
 }
