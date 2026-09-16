@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::Path;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -7,16 +8,14 @@ use gio::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use crate::model::{Direction, SessionLayoutTemplate, SplitOrientation};
+use crate::model::{Direction, Profile, SessionLayoutTemplate, SplitOrientation};
+use crate::ui::preferences::TilixPreferencesWindow;
 use crate::ui::session_view::{SessionAction, SessionView};
 
 type SessionMap = Rc<RefCell<HashMap<adw::TabPage, Rc<RefCell<SessionView>>>>>;
 
-pub struct TilixWindow {
-    window: adw::ApplicationWindow,
-    tab_view: adw::TabView,
-    sessions: SessionMap,
-    next_session_id: Rc<RefCell<u64>>,
+thread_local! {
+    static WIDGET_TO_SESSION: RefCell<HashMap<gtk::Widget, Rc<RefCell<SessionView>>>> = RefCell::new(HashMap::new());
 }
 
 pub fn setup_css() {
@@ -55,6 +54,7 @@ pub fn setup_accels(app: &adw::Application) {
     app.set_accels_for_action("win.split-down", &["<Primary><Shift>d"]);
     app.set_accels_for_action("win.balance-layout", &["<Primary><Shift>b"]);
     app.set_accels_for_action("win.toggle-sync-input", &["<Primary><Shift>i"]);
+    app.set_accels_for_action("win.preferences", &["<Primary>comma"]);
     app.set_accels_for_action("win.focus-up", &["<Alt>Up"]);
     app.set_accels_for_action("win.focus-down", &["<Alt>Down"]);
     app.set_accels_for_action("win.focus-left", &["<Alt>Left"]);
@@ -67,8 +67,15 @@ pub fn setup_accels(app: &adw::Application) {
     }
 }
 
+pub struct TilixWindow {
+    window: adw::ApplicationWindow,
+    tab_view: adw::TabView,
+    sessions: SessionMap,
+    next_session_id: Rc<RefCell<u64>>,
+}
+
 impl TilixWindow {
-    pub fn new(app: &adw::Application) -> Self {
+    pub fn new_empty(app: &adw::Application) -> Self {
         let window = adw::ApplicationWindow::new(app);
         window.set_default_size(900, 600);
         window.set_title(Some("Tilix"));
@@ -130,12 +137,40 @@ impl TilixWindow {
         };
 
         tilix_win.setup_tab_close_handler();
+        tilix_win.setup_tab_detaching(app);
         tilix_win.setup_actions();
 
+        tilix_win
+    }
+
+    pub fn new(app: &adw::Application) -> Self {
+        let tilix_win = Self::new_empty(app);
         // Open initial tab
         tilix_win.create_tab();
-
         tilix_win
+    }
+
+    fn setup_tab_detaching(&self, app: &adw::Application) {
+        let app_weak = app.downgrade();
+        self.tab_view.connect_create_window(move |_tv| {
+            let app = app_weak.upgrade()?;
+            let new_win = TilixWindow::new_empty(&app);
+            new_win.present();
+            Some(new_win.tab_view().clone())
+        });
+
+        let sessions_attached = Rc::clone(&self.sessions);
+        self.tab_view.connect_page_attached(move |_tv, page, _pos| {
+            let child = page.child();
+            if let Some(session) = WIDGET_TO_SESSION.with(|m| m.borrow().get(&child).cloned()) {
+                sessions_attached.borrow_mut().insert(page.clone(), session);
+            }
+        });
+
+        let sessions_detached = Rc::clone(&self.sessions);
+        self.tab_view.connect_page_detached(move |_tv, page, _pos| {
+            sessions_detached.borrow_mut().remove(page);
+        });
     }
 
     fn create_tab_internal(
@@ -143,9 +178,10 @@ impl TilixWindow {
         sessions: &SessionMap,
         next_session_id: &Rc<RefCell<u64>>,
         model: Option<crate::model::SessionModel>,
+        initial_directory: Option<&Path>,
     ) -> (adw::TabPage, Rc<RefCell<SessionView>>) {
         let session_view = match model {
-            Some(m) => Rc::new(RefCell::new(SessionView::with_model(m))),
+            Some(m) => Rc::new(RefCell::new(SessionView::with_model_and_dir(m, initial_directory))),
             None => {
                 let initial_pane_id = {
                     let mut id = next_session_id.borrow_mut();
@@ -153,11 +189,12 @@ impl TilixWindow {
                     *id += 100; // Offset pane IDs by 100 per tab to prevent any pane ID collisions
                     crate::model::PaneId(cur)
                 };
-                Rc::new(RefCell::new(SessionView::with_id(initial_pane_id)))
+                Rc::new(RefCell::new(SessionView::with_id_and_dir(initial_pane_id, initial_directory)))
             }
         };
 
         let tab_page = tab_view.append(session_view.borrow().widget());
+        WIDGET_TO_SESSION.with(|m| m.borrow_mut().insert(tab_page.child(), Rc::clone(&session_view)));
 
         // Set initial title and bind title changes
         let initial_title = session_view.borrow().active_title();
@@ -209,11 +246,15 @@ impl TilixWindow {
     }
 
     pub fn create_tab(&self) -> (adw::TabPage, Rc<RefCell<SessionView>>) {
+        let initial_dir = self.tab_view.selected_page().and_then(|page| {
+            self.sessions.borrow().get(&page).and_then(|s| s.borrow().active_current_directory())
+        });
         Self::create_tab_internal(
             &self.tab_view,
             &self.sessions,
             &self.next_session_id,
             None,
+            initial_dir.as_deref(),
         )
     }
 
@@ -234,6 +275,7 @@ impl TilixWindow {
             &self.sessions,
             &self.next_session_id,
             Some(session_model),
+            None,
         )
     }
 
@@ -260,8 +302,10 @@ impl TilixWindow {
         let win_weak = self.window.downgrade();
 
         self.tab_view.connect_close_page(move |tv, page| {
+            let child = page.child();
             tv.close_page_finish(page, true);
             sessions_clone.borrow_mut().remove(page);
+            WIDGET_TO_SESSION.with(|m| m.borrow_mut().remove(&child));
 
             if tv.n_pages() == 0 {
                 if let Some(win) = win_weak.upgrade() {
@@ -291,7 +335,11 @@ impl TilixWindow {
                 let Some(sessions) = sessions_weak.upgrade() else { return; };
                 let Some(next_id) = next_id_weak.upgrade() else { return; };
 
-                Self::create_tab_internal(&tv, &sessions, &next_id, None);
+                let initial_dir = tv.selected_page().and_then(|page| {
+                    sessions.borrow().get(&page).and_then(|s| s.borrow().active_current_directory())
+                });
+
+                Self::create_tab_internal(&tv, &sessions, &next_id, None, initial_dir.as_deref());
             });
             self.window.add_action(&action);
         }
@@ -409,7 +457,25 @@ impl TilixWindow {
                     (p_id, s_id)
                 };
                 let session_model = template.instantiate_session(start_pane_id, start_split_id);
-                Self::create_tab_internal(&tv, &sessions, &next_id, Some(session_model));
+                Self::create_tab_internal(&tv, &sessions, &next_id, Some(session_model), None);
+            });
+            self.window.add_action(&action);
+        }
+
+        // Preferences
+        {
+            let action = gio::SimpleAction::new("preferences", None);
+            let win_weak = self.window.downgrade();
+            action.connect_activate(move |_, _| {
+                let Some(win) = win_weak.upgrade() else { return; };
+                let pref = TilixPreferencesWindow::new(&win, move |profile| {
+                    WIDGET_TO_SESSION.with(|m| {
+                        for session in m.borrow().values() {
+                            session.borrow().apply_profile(profile);
+                        }
+                    });
+                });
+                pref.present();
             });
             self.window.add_action(&action);
         }
@@ -597,5 +663,11 @@ impl TilixWindow {
 
     pub fn present(&self) {
         self.window.present();
+    }
+
+    pub fn apply_profile(&self, profile: &Profile) {
+        for session in self.sessions.borrow().values() {
+            session.borrow().apply_profile(profile);
+        }
     }
 }

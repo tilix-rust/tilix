@@ -204,6 +204,22 @@ impl LayoutNode {
         }
     }
 
+    fn swap_panes(&mut self, a: PaneId, b: PaneId) {
+        match self {
+            LayoutNode::Leaf(id) => {
+                if *id == a {
+                    *id = b;
+                } else if *id == b {
+                    *id = a;
+                }
+            }
+            LayoutNode::Split { first, second, .. } => {
+                first.swap_panes(a, b);
+                second.swap_panes(a, b);
+            }
+        }
+    }
+
     fn compute_rects(&self, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
         match self {
             LayoutNode::Leaf(id) => out.push((*id, rect)),
@@ -383,6 +399,22 @@ impl LayoutTree {
         };
 
         root.close_leaf(target)
+    }
+
+    pub fn swap_panes(&mut self, a: PaneId, b: PaneId) -> Result<(), LayoutError> {
+        if !self.contains(a) {
+            return Err(LayoutError::PaneNotFound(a));
+        }
+        if !self.contains(b) {
+            return Err(LayoutError::PaneNotFound(b));
+        }
+        if a == b {
+            return Ok(());
+        }
+        if let Some(ref mut root) = self.root {
+            root.swap_panes(a, b);
+        }
+        Ok(())
     }
 
     pub fn balance(&mut self) {
@@ -816,5 +848,51 @@ mod tests {
         // Next split should use updated next_split_id
         let next_s = tree.next_split_id();
         assert_eq!(next_s, SplitId(22));
+    }
+
+    #[test]
+    fn test_swap_panes_adjacent_leaves() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
+
+        tree.swap_panes(PaneId(1), PaneId(2)).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(2), PaneId(1)]);
+    }
+
+    #[test]
+    fn test_swap_panes_nested_leaves() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        tree.split(PaneId(2), SplitOrientation::Vertical, PaneId(3))
+            .unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2), PaneId(3)]);
+
+        tree.swap_panes(PaneId(1), PaneId(3)).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(3), PaneId(2), PaneId(1)]);
+    }
+
+    #[test]
+    fn test_swap_panes_same_pane_noop() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        tree.swap_panes(PaneId(1), PaneId(1)).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
+    }
+
+    #[test]
+    fn test_swap_panes_nonexistent_returns_err() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        assert_eq!(
+            tree.swap_panes(PaneId(1), PaneId(99)),
+            Err(LayoutError::PaneNotFound(PaneId(99)))
+        );
+        assert_eq!(
+            tree.swap_panes(PaneId(99), PaneId(1)),
+            Err(LayoutError::PaneNotFound(PaneId(99)))
+        );
     }
 }

@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -7,7 +8,7 @@ use vte4 as vte;
 use vte::prelude::*;
 
 use crate::model::{ColorScheme, CursorBlinkPreference, CursorShapePreference, PaneId, Profile, SplitOrientation};
-use crate::pty::{default_env, detect_shell};
+use crate::pty::{default_env, detect_shell, parse_osc7_uri};
 
 type CloseCallback = Box<dyn Fn(PaneId)>;
 type SplitCallback = Box<dyn Fn(PaneId, SplitOrientation)>;
@@ -15,6 +16,8 @@ type FocusCallback = Box<dyn Fn(PaneId)>;
 type CommitCallback = Box<dyn Fn(PaneId, &str)>;
 type TitleCallback = Box<dyn Fn(PaneId, &str)>;
 type SyncToggleCallback = Box<dyn Fn(PaneId, bool)>;
+type BellCallback = Box<dyn Fn(PaneId)>;
+type ChildExitCallback = Box<dyn Fn(PaneId, i32)>;
 
 #[derive(Clone)]
 pub struct TerminalPane {
@@ -24,6 +27,7 @@ pub struct TerminalPane {
     sync_btn: gtk::ToggleButton,
     terminal: vte::Terminal,
     pane_id: PaneId,
+    current_directory: Rc<RefCell<Option<PathBuf>>>,
     is_sync_enabled: Rc<Cell<bool>>,
     close_callbacks: Rc<RefCell<Vec<CloseCallback>>>,
     split_callbacks: Rc<RefCell<Vec<SplitCallback>>>,
@@ -31,10 +35,12 @@ pub struct TerminalPane {
     commit_callbacks: Rc<RefCell<Vec<CommitCallback>>>,
     title_callbacks: Rc<RefCell<Vec<TitleCallback>>>,
     sync_toggled_callbacks: Rc<RefCell<Vec<SyncToggleCallback>>>,
+    bell_callbacks: Rc<RefCell<Vec<BellCallback>>>,
+    child_exit_callbacks: Rc<RefCell<Vec<ChildExitCallback>>>,
 }
 
 impl TerminalPane {
-    pub fn new(pane_id: PaneId) -> Self {
+    pub fn new(pane_id: PaneId, initial_directory: Option<&Path>) -> Self {
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         container.add_css_class("terminal-pane");
 
@@ -85,6 +91,7 @@ impl TerminalPane {
         container.append(&header);
         container.append(&terminal);
 
+        let current_directory = Rc::new(RefCell::new(initial_directory.map(|p| p.to_path_buf())));
         let is_sync_enabled = Rc::new(Cell::new(true));
         let close_callbacks: Rc<RefCell<Vec<CloseCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let split_callbacks: Rc<RefCell<Vec<SplitCallback>>> = Rc::new(RefCell::new(Vec::new()));
@@ -92,6 +99,8 @@ impl TerminalPane {
         let commit_callbacks: Rc<RefCell<Vec<CommitCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let title_callbacks: Rc<RefCell<Vec<TitleCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let sync_toggled_callbacks: Rc<RefCell<Vec<SyncToggleCallback>>> = Rc::new(RefCell::new(Vec::new()));
+        let bell_callbacks: Rc<RefCell<Vec<BellCallback>>> = Rc::new(RefCell::new(Vec::new()));
+        let child_exit_callbacks: Rc<RefCell<Vec<ChildExitCallback>>> = Rc::new(RefCell::new(Vec::new()));
 
         // Wire sync button
         {
@@ -140,11 +149,39 @@ impl TerminalPane {
 
         // Wire child exit
         {
-            let callbacks = Rc::clone(&close_callbacks);
-            terminal.connect_child_exited(move |_term, _status| {
+            let close_cbs = Rc::clone(&close_callbacks);
+            let exit_cbs = Rc::clone(&child_exit_callbacks);
+            terminal.connect_child_exited(move |_term, status| {
+                let exit_list = exit_cbs.borrow();
+                for cb in exit_list.iter() {
+                    cb(pane_id, status);
+                }
+                let list = close_cbs.borrow();
+                for cb in list.iter() {
+                    cb(pane_id);
+                }
+            });
+        }
+
+        // Wire bell
+        {
+            let callbacks = Rc::clone(&bell_callbacks);
+            terminal.connect_bell(move |_term| {
                 let list = callbacks.borrow();
                 for cb in list.iter() {
                     cb(pane_id);
+                }
+            });
+        }
+
+        // Wire OSC 7 current directory uri changes
+        {
+            let cwd_clone = Rc::clone(&current_directory);
+            terminal.connect_current_directory_uri_changed(move |term| {
+                if let Some(uri) = term.current_directory_uri() {
+                    if let Some(path) = parse_osc7_uri(&uri) {
+                        *cwd_clone.borrow_mut() = Some(path);
+                    }
                 }
             });
         }
@@ -192,9 +229,10 @@ impl TerminalPane {
         let shell = detect_shell();
         let env_vars = default_env();
         let env_refs: Vec<&str> = env_vars.iter().map(|s| s.as_str()).collect();
+        let init_dir_str = initial_directory.and_then(|p| p.to_str());
         terminal.spawn_async(
             vte::PtyFlags::DEFAULT,
-            None,
+            init_dir_str,
             &[&shell],
             &env_refs,
             glib::SpawnFlags::DEFAULT,
@@ -215,6 +253,7 @@ impl TerminalPane {
             sync_btn,
             terminal,
             pane_id,
+            current_directory,
             is_sync_enabled,
             close_callbacks,
             split_callbacks,
@@ -222,6 +261,8 @@ impl TerminalPane {
             commit_callbacks,
             title_callbacks,
             sync_toggled_callbacks,
+            bell_callbacks,
+            child_exit_callbacks,
         }
     }
 
@@ -369,4 +410,25 @@ impl TerminalPane {
             }
         }
     }
+
+    pub fn current_directory(&self) -> Option<PathBuf> {
+        self.current_directory.borrow().clone()
+    }
+
+    pub fn connect_bell<F: Fn(PaneId) + 'static>(&self, f: F) {
+        self.bell_callbacks.borrow_mut().push(Box::new(f));
+    }
+
+    pub fn connect_child_exited<F: Fn(PaneId, i32) + 'static>(&self, f: F) {
+        self.child_exit_callbacks.borrow_mut().push(Box::new(f));
+    }
+
+    pub fn setup_drag_source(&self) {
+        crate::ui::dnd::setup_pane_drag_source(&self.header, self.pane_id);
+    }
+
+    pub fn setup_drop_target<F: Fn(PaneId, PaneId) + 'static>(&self, on_swap: F) {
+        crate::ui::dnd::setup_pane_drop_target(&self.container, self.pane_id, on_swap);
+    }
 }
+

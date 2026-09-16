@@ -1,9 +1,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use adw::prelude::*;
 use gtk4 as gtk;
-use gtk::prelude::*;
+use libadwaita as adw;
 
 use crate::model::{
     ColorScheme, Direction, LayoutNode, LayoutTree, PaneId, Profile, SessionModel,
@@ -20,6 +22,7 @@ pub enum SessionAction {
 
 pub type ActionHandler = Box<dyn Fn(SessionAction)>;
 pub type TitleChangedHandler = Box<dyn Fn(&str)>;
+pub type SwapHandler = Box<dyn Fn(PaneId, PaneId)>;
 
 #[derive(Clone)]
 pub struct SessionView {
@@ -28,19 +31,28 @@ pub struct SessionView {
     model: Rc<RefCell<SessionModel>>,
     action_handler: Rc<RefCell<Option<ActionHandler>>>,
     title_changed_callback: Rc<RefCell<Option<TitleChangedHandler>>>,
+    swap_handler: Rc<RefCell<Option<SwapHandler>>>,
 }
 
 impl SessionView {
     pub fn new() -> Self {
-        Self::with_id(PaneId(1))
+        Self::with_id_and_dir(PaneId(1), None)
     }
 
     pub fn with_id(initial_pane_id: PaneId) -> Self {
+        Self::with_id_and_dir(initial_pane_id, None)
+    }
+
+    pub fn with_id_and_dir(initial_pane_id: PaneId, dir: Option<&Path>) -> Self {
         let model = SessionModel::new(initial_pane_id);
-        Self::with_model(model)
+        Self::with_model_and_dir(model, dir)
     }
 
     pub fn with_model(model: SessionModel) -> Self {
+        Self::with_model_and_dir(model, None)
+    }
+
+    pub fn with_model_and_dir(model: SessionModel, dir: Option<&Path>) -> Self {
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         container.set_vexpand(true);
         container.set_hexpand(true);
@@ -49,6 +61,7 @@ impl SessionView {
         let panes = Rc::new(RefCell::new(HashMap::new()));
         let action_handler = Rc::new(RefCell::new(None));
         let title_changed_callback = Rc::new(RefCell::new(None));
+        let swap_handler = Rc::new(RefCell::new(None));
 
         let session = Self {
             container,
@@ -56,16 +69,28 @@ impl SessionView {
             model,
             action_handler,
             title_changed_callback,
+            swap_handler,
         };
+
+        let panes_c = Rc::clone(&session.panes);
+        let model_c = Rc::clone(&session.model);
+        let container_c = session.container.clone();
+        *session.swap_handler.borrow_mut() = Some(Box::new(move |src, dest| {
+            if model_c.borrow_mut().layout.swap_panes(src, dest).is_ok() {
+                Self::rebuild_projection_with(&container_c, &panes_c, &model_c);
+            }
+        }));
 
         let pane_ids = session.model.borrow().layout.panes();
         for id in pane_ids {
             let pane = Self::create_pane(
                 id,
+                dir,
                 &session.panes,
                 &session.model,
                 &session.action_handler,
                 &session.title_changed_callback,
+                &session.swap_handler,
             );
             session.panes.borrow_mut().insert(id, pane);
         }
@@ -84,13 +109,23 @@ impl SessionView {
 
     fn create_pane(
         id: PaneId,
+        initial_directory: Option<&Path>,
         panes: &Rc<RefCell<HashMap<PaneId, TerminalPane>>>,
         model: &Rc<RefCell<SessionModel>>,
         action_handler: &Rc<RefCell<Option<ActionHandler>>>,
         title_changed_callback: &Rc<RefCell<Option<TitleChangedHandler>>>,
+        swap_handler: &Rc<RefCell<Option<SwapHandler>>>,
     ) -> TerminalPane {
-        let pane = TerminalPane::new(id);
+        let pane = TerminalPane::new(id, initial_directory);
         pane.apply_profile(&Profile::default());
+
+        pane.setup_drag_source();
+        let swap_cb = Rc::clone(swap_handler);
+        pane.setup_drop_target(move |src, dest| {
+            if let Some(ref cb) = *swap_cb.borrow() {
+                cb(src, dest);
+            }
+        });
 
         let handler = Rc::clone(action_handler);
         pane.connect_close(move |p_id| {
@@ -150,6 +185,32 @@ impl SessionView {
             if model_title.borrow().active_pane == Some(p_id) {
                 if let Some(ref cb) = *title_cb.borrow() {
                     cb(title);
+                }
+            }
+        });
+
+        // Bell notification
+        let model_bell = Rc::clone(model);
+        let title_bell = pane.title();
+        pane.connect_bell(move |p_id| {
+            let is_active = model_bell.borrow().active_pane == Some(p_id);
+            let cfg = crate::model::AppConfig::load();
+            if cfg.notifications_enabled && cfg.bell_notifications && !is_active {
+                if let Some(app) = gio::Application::default().and_then(|a| a.downcast::<adw::Application>().ok()) {
+                    crate::ui::notifications::NotificationService::notify_bell(&app, &title_bell);
+                }
+            }
+        });
+
+        // Process exit notification
+        let model_exit = Rc::clone(model);
+        let title_exit = pane.title();
+        pane.connect_child_exited(move |p_id, status| {
+            let is_active = model_exit.borrow().active_pane == Some(p_id);
+            let cfg = crate::model::AppConfig::load();
+            if cfg.notifications_enabled && cfg.process_exit_notifications && !is_active {
+                if let Some(app) = gio::Application::default().and_then(|a| a.downcast::<adw::Application>().ok()) {
+                    crate::ui::notifications::NotificationService::notify_process_exit(&app, &title_exit, status);
                 }
             }
         });
@@ -234,6 +295,19 @@ impl SessionView {
         }
     }
 
+    pub fn active_current_directory(&self) -> Option<PathBuf> {
+        let active_id = self.model.borrow().active_pane?;
+        let panes = self.panes.borrow();
+        let pane = panes.get(&active_id)?;
+        pane.current_directory()
+    }
+
+    pub fn swap_panes(&self, a: PaneId, b: PaneId) {
+        if self.model.borrow_mut().layout.swap_panes(a, b).is_ok() {
+            self.rebuild_projection();
+        }
+    }
+
     pub fn split_active(&self, orientation: SplitOrientation) {
         let active_pane = self.model.borrow().active_pane;
         let target_pane = match active_pane {
@@ -248,18 +322,31 @@ impl SessionView {
             }
         };
 
-        self.split_pane(target_pane, orientation);
+        let dir = self.panes.borrow().get(&target_pane).and_then(|p| p.current_directory());
+        self.split_pane_with_dir(target_pane, orientation, dir.as_deref());
     }
 
     pub fn split_pane(&self, target: PaneId, orientation: SplitOrientation) {
+        let dir = self.panes.borrow().get(&target).and_then(|p| p.current_directory());
+        self.split_pane_with_dir(target, orientation, dir.as_deref());
+    }
+
+    pub fn split_pane_with_dir(
+        &self,
+        target: PaneId,
+        orientation: SplitOrientation,
+        dir: Option<&Path>,
+    ) {
         let res = self.model.borrow_mut().split_pane(target, orientation);
         if let Ok(new_id) = res {
             let new_pane = Self::create_pane(
                 new_id,
+                dir,
                 &self.panes,
                 &self.model,
                 &self.action_handler,
                 &self.title_changed_callback,
+                &self.swap_handler,
             );
             self.panes.borrow_mut().insert(new_id, new_pane);
             self.rebuild_projection();
@@ -385,36 +472,46 @@ impl SessionView {
         }
     }
 
-    fn rebuild_projection(&self) {
-        let panes = self.panes.borrow();
-        for pane in panes.values() {
+    fn rebuild_projection_with(
+        container: &gtk::Box,
+        panes: &Rc<RefCell<HashMap<PaneId, TerminalPane>>>,
+        model: &Rc<RefCell<SessionModel>>,
+    ) {
+        let panes_b = panes.borrow();
+        for pane in panes_b.values() {
             let w = pane.widget();
             if w.parent().is_some() {
                 w.unparent();
             }
         }
 
-        while let Some(child) = self.container.first_child() {
+        while let Some(child) = container.first_child() {
             child.unparent();
         }
 
-        let model = self.model.borrow();
-        let Some(root_node) = model.layout.root() else {
+        let model_b = model.borrow();
+        let Some(root_node) = model_b.layout.root() else {
             return;
         };
 
-        let root_widget = Self::build_node(root_node, &panes, &self.model);
+        let root_widget = Self::build_node(root_node, &panes_b, model);
         root_widget.set_vexpand(true);
         root_widget.set_hexpand(true);
-        self.container.append(&root_widget);
+        container.append(&root_widget);
 
-        let active_id = model.active_pane;
-        drop(model);
-        drop(panes);
+        let active_id = model_b.active_pane;
+        drop(model_b);
+        drop(panes_b);
 
         if let Some(id) = active_id {
-            self.set_active_pane(id);
+            if let Some(pane) = panes.borrow().get(&id) {
+                pane.set_active(true);
+            }
         }
+    }
+
+    fn rebuild_projection(&self) {
+        Self::rebuild_projection_with(&self.container, &self.panes, &self.model);
     }
 }
 

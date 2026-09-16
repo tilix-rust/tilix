@@ -5,5 +5,6 @@ pub mod ui;
 
 fn main() -> glib::ExitCode {
     let app = app::TilixApplication::new();
-    app.run()
+    let args: Vec<String> = std::env::args().collect();
+    app.run_with_args(&args)
 }
