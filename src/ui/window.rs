@@ -13,11 +13,14 @@ use crate::model::{
 };
 use crate::ui::preferences::TilixPreferencesWindow;
 use crate::ui::session_view::{SessionAction, SessionView};
+use crate::ui::terminal_pane::TerminalPane;
 
 type SessionMap = Rc<RefCell<HashMap<adw::TabPage, Rc<RefCell<SessionView>>>>>;
+type TabReference = (glib::WeakRef<adw::TabView>, glib::WeakRef<adw::TabPage>);
 
 thread_local! {
     static WIDGET_TO_SESSION: RefCell<HashMap<gtk::Widget, Rc<RefCell<SessionView>>>> = RefCell::new(HashMap::new());
+    static SESSION_TO_TAB: RefCell<HashMap<gtk::Widget, TabReference>> = RefCell::new(HashMap::new());
     static WINDOW_HEADER_BARS: RefCell<Vec<glib::WeakRef<adw::HeaderBar>>> = const { RefCell::new(Vec::new()) };
     static WINDOW_TAB_BARS: RefCell<Vec<glib::WeakRef<adw::TabBar>>> = const { RefCell::new(Vec::new()) };
 }
@@ -28,6 +31,87 @@ pub fn register_session_widget(widget: &gtk::Widget, session: Rc<RefCell<Session
 
 pub fn unregister_session_widget(widget: &gtk::Widget) {
     WIDGET_TO_SESSION.with(|m| m.borrow_mut().remove(widget));
+    SESSION_TO_TAB.with(|m| m.borrow_mut().remove(widget));
+}
+
+pub fn session_for_widget(widget: &gtk::Widget) -> Option<Rc<RefCell<SessionView>>> {
+    let mut curr = Some(widget.clone());
+    while let Some(w) = curr {
+        if let Some(session) = WIDGET_TO_SESSION.with(|m| m.borrow().get(&w).cloned()) {
+            return Some(session);
+        }
+        curr = w.parent();
+    }
+    None
+}
+
+pub fn find_session_widget(widget: &gtk::Widget) -> Option<gtk::Widget> {
+    let mut curr = Some(widget.clone());
+    while let Some(w) = curr {
+        if WIDGET_TO_SESSION.with(|m| m.borrow().contains_key(&w)) {
+            return Some(w);
+        }
+        curr = w.parent();
+    }
+    None
+}
+
+pub fn close_session_tab(session_widget: &gtk::Widget) {
+    let tab_info = SESSION_TO_TAB.with(|m| m.borrow().get(session_widget).cloned());
+    if let Some((tv_weak, page_weak)) = tab_info {
+        if let (Some(tv), Some(page)) = (tv_weak.upgrade(), page_weak.upgrade()) {
+            tv.close_page(&page);
+        }
+    }
+}
+
+pub fn detach_drag_to_new_window() -> bool {
+    let Some(drag) = crate::ui::dnd::take_active_pane_drag() else { return false; };
+    let Some(source_session_widget) = drag.source_session_widget.upgrade() else { return false; };
+    let Some(source_session_rc) = session_for_widget(&source_session_widget) else { return false; };
+
+    let total_panes = {
+        let tab_info = SESSION_TO_TAB.with(|m| m.borrow().get(&source_session_widget).cloned());
+        if let Some((tv_weak, _)) = tab_info {
+            if let Some(tv) = tv_weak.upgrade() {
+                let mut count = 0;
+                for i in 0..tv.n_pages() {
+                    let page = tv.nth_page(i);
+                    let child = page.child();
+                    if let Some(session) = WIDGET_TO_SESSION.with(|m| m.borrow().get(&child).cloned()) {
+                        count += session.borrow().pane_count();
+                    }
+                }
+                count
+            } else {
+                source_session_rc.borrow().pane_count()
+            }
+        } else {
+            source_session_rc.borrow().pane_count()
+        }
+    };
+
+    if total_panes <= 1 {
+        // Single-pane window detach guard: preserve sole pane in window
+        return false;
+    }
+
+    let Some(pane) = source_session_rc.borrow().remove_pane_for_transfer(drag.pane_id) else {
+        return false;
+    };
+    source_session_rc.borrow().rebuild_projection();
+
+    if source_session_rc.borrow().is_empty() {
+        close_session_tab(&source_session_widget);
+    }
+
+    let Some(app) = gio::Application::default().and_then(|a| a.downcast::<adw::Application>().ok()) else {
+        return false;
+    };
+    let new_win = TilixWindow::new_empty(&app);
+    new_win.create_tab_with_existing_pane(pane);
+    new_win.present();
+    true
 }
 
 pub fn apply_profile_to_all_sessions(profile: &Profile) {
@@ -85,16 +169,48 @@ pub fn setup_css() {
     css_provider.load_from_string(
         "
         .terminal-pane {
-            border: 2px solid transparent;
-            border-radius: 4px;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            margin: 0;
         }
         .terminal-pane.active-pane {
-            border: 2px solid @accent_color;
+            border: none;
         }
         .terminal-pane-header {
             background-color: alpha(@window_bg_color, 0.7);
             border-bottom: 1px solid alpha(@borders, 0.4);
-            padding: 2px 4px;
+            padding: 2px 6px;
+            opacity: 0.8;
+            transition: opacity 150ms ease-in-out;
+        }
+        .terminal-pane.active-pane .terminal-pane-header {
+            opacity: 1.0;
+        }
+        paned > separator {
+            background-color: alpha(@borders, 0.75);
+            background-clip: content-box;
+            transition: background-color 150ms ease-in-out;
+        }
+        paned.horizontal > separator:not(.wide) {
+            min-width: 1px;
+            margin: 0 -4px;
+            padding: 0 4px;
+        }
+        paned.vertical > separator:not(.wide) {
+            min-height: 1px;
+            margin: -4px 0;
+            padding: 4px 0;
+        }
+        paned > separator:hover,
+        paned > separator:active {
+            background-color: @accent_color;
+        }
+        .drop-indicator-overlay {
+            background-color: alpha(@accent_color, 0.35);
+            border: 2px solid @accent_color;
+            border-radius: 4px;
+            transition: all 120ms ease-in-out;
         }
         ",
     );
@@ -228,16 +344,22 @@ impl TilixWindow {
         });
 
         let sessions_attached = Rc::clone(&self.sessions);
+        let tab_view_weak = self.tab_view.downgrade();
         self.tab_view.connect_page_attached(move |_tv, page, _pos| {
             let child = page.child();
             if let Some(session) = WIDGET_TO_SESSION.with(|m| m.borrow().get(&child).cloned()) {
                 sessions_attached.borrow_mut().insert(page.clone(), session);
+                SESSION_TO_TAB.with(|m| {
+                    m.borrow_mut().insert(child.clone(), (tab_view_weak.clone(), page.downgrade()));
+                });
             }
         });
 
         let sessions_detached = Rc::clone(&self.sessions);
         self.tab_view.connect_page_detached(move |_tv, page, _pos| {
+            let child = page.child();
             sessions_detached.borrow_mut().remove(page);
+            SESSION_TO_TAB.with(|m| m.borrow_mut().remove(&child));
         });
     }
 
@@ -263,6 +385,12 @@ impl TilixWindow {
         let widget = session_view.borrow().widget().clone();
         WIDGET_TO_SESSION.with(|m| m.borrow_mut().insert(widget.clone(), Rc::clone(&session_view)));
         let tab_page = tab_view.append(&widget);
+        SESSION_TO_TAB.with(|m| {
+            m.borrow_mut().insert(
+                widget.clone(),
+                (tab_view.downgrade(), tab_page.downgrade()),
+            )
+        });
         sessions.borrow_mut().insert(tab_page.clone(), Rc::clone(&session_view));
 
         // Set initial title and bind title changes
@@ -379,6 +507,7 @@ impl TilixWindow {
                 session.borrow().close();
             }
             WIDGET_TO_SESSION.with(|m| m.borrow_mut().remove(&child));
+            SESSION_TO_TAB.with(|m| m.borrow_mut().remove(&child));
 
             if tv.n_pages() == 0 {
                 if let Some(win) = win_weak.upgrade() {
@@ -388,6 +517,70 @@ impl TilixWindow {
 
             glib::Propagation::Stop
         });
+    }
+
+    pub fn create_tab_with_existing_pane(
+        &self,
+        pane: TerminalPane,
+    ) -> (adw::TabPage, Rc<RefCell<SessionView>>) {
+        let session_view = Rc::new(RefCell::new(SessionView::with_existing_pane(pane)));
+        let widget = session_view.borrow().widget().clone();
+        WIDGET_TO_SESSION.with(|m| m.borrow_mut().insert(widget.clone(), Rc::clone(&session_view)));
+        let tab_page = self.tab_view.append(&widget);
+        SESSION_TO_TAB.with(|m| {
+            m.borrow_mut().insert(
+                widget.clone(),
+                (self.tab_view.downgrade(), tab_page.downgrade()),
+            )
+        });
+        self.sessions
+            .borrow_mut()
+            .insert(tab_page.clone(), Rc::clone(&session_view));
+
+        let initial_title = session_view.borrow().active_title();
+        tab_page.set_title(&initial_title);
+
+        let page_weak = tab_page.downgrade();
+        session_view.borrow().connect_title_changed(move |title| {
+            if let Some(page) = page_weak.upgrade() {
+                page.set_title(title);
+            }
+        });
+
+        // Wire session view action handler
+        let session_weak = Rc::downgrade(&session_view);
+        let tab_page_weak = tab_page.downgrade();
+        let tab_view_weak = self.tab_view.downgrade();
+        session_view.borrow().set_action_handler(move |action| {
+            let s_weak = session_weak.clone();
+            let p_weak = tab_page_weak.clone();
+            let tv_weak = tab_view_weak.clone();
+            glib::idle_add_local_once(move || {
+                let Some(session) = s_weak.upgrade() else { return; };
+                match action {
+                    SessionAction::Split(id, orientation) => {
+                        session.borrow_mut().set_active_pane(id);
+                        session.borrow_mut().split_active(orientation);
+                    }
+                    SessionAction::Close(id) => {
+                        session.borrow_mut().close_pane(id);
+                        if session.borrow().is_empty() {
+                            if let (Some(tv), Some(p)) = (tv_weak.upgrade(), p_weak.upgrade()) {
+                                tv.close_page(&p);
+                            }
+                        }
+                    }
+                    SessionAction::Focus(id) => {
+                        session.borrow_mut().set_active_pane(id);
+                    }
+                }
+            });
+        });
+
+        self.tab_view.set_selected_page(&tab_page);
+        session_view.borrow().grab_focus();
+
+        (tab_page, session_view)
     }
 
     fn active_session(&self) -> Option<Rc<RefCell<SessionView>>> {
@@ -980,6 +1173,13 @@ mod tests {
             pref.window().set_application(Some(&app));
             assert!(!pref.window().is_modal());
             assert_eq!(pref.window().transient_for(), None);
+        });
+    }
+
+    #[test]
+    fn test_setup_css_loads_without_errors() {
+        run_gtk_test(|| {
+            setup_css();
         });
     }
 }

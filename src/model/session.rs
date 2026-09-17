@@ -1,4 +1,4 @@
-use crate::model::layout::{Direction, LayoutError, LayoutTree, PaneId, SplitOrientation};
+use crate::model::layout::{Direction, DockPosition, LayoutError, LayoutTree, PaneId, SplitOrientation};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -94,7 +94,7 @@ impl SessionModel {
         self.split_pane(active, orientation)
     }
 
-    pub fn close_pane(&mut self, id: PaneId) -> Result<Option<PaneId>, LayoutError> {
+    pub fn remove_pane(&mut self, id: PaneId) -> Result<Option<PaneId>, LayoutError> {
         let fallback_focus = self.layout.close(id)?;
         self.sync_groups.remove(&id);
         self.pane_sync_overrides.remove(&id);
@@ -110,9 +110,38 @@ impl SessionModel {
             self.active_pane = next_focus;
             Ok(next_focus)
         } else {
-            // When closing another pane, the active pane remains unchanged
+            // When closing or removing another pane, the active pane remains unchanged
             Ok(self.active_pane)
         }
+    }
+
+    pub fn close_pane(&mut self, id: PaneId) -> Result<Option<PaneId>, LayoutError> {
+        self.remove_pane(id)
+    }
+
+    pub fn dock_pane(
+        &mut self,
+        source: PaneId,
+        target: PaneId,
+        position: DockPosition,
+    ) -> Result<(), LayoutError> {
+        self.layout.dock_pane(source, target, position)?;
+        self.set_active_pane(source);
+        Ok(())
+    }
+
+    pub fn adopt_pane(
+        &mut self,
+        new_pane: PaneId,
+        target: PaneId,
+        position: DockPosition,
+    ) -> Result<(), LayoutError> {
+        self.layout.insert_pane_dock(new_pane, target, position)?;
+        if new_pane.0 >= self.next_pane_id {
+            self.next_pane_id = new_pane.0 + 1;
+        }
+        self.set_active_pane(new_pane);
+        Ok(())
     }
 
     pub fn focus_adjacent(&mut self, direction: Direction) -> Option<PaneId> {
@@ -302,5 +331,48 @@ mod tests {
         let session: SessionModel = serde_json::from_str(json).unwrap();
         assert_eq!(session.active_pane, Some(PaneId(1)));
         assert!(session.focus_history.is_empty());
+    }
+
+    #[test]
+    fn test_session_model_remove_pane() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        assert_eq!(session.active_pane, Some(p2));
+        assert_eq!(session.layout.panes(), vec![PaneId(1), p2]);
+
+        // Remove p2
+        let fallback = session.remove_pane(p2).unwrap();
+        assert_eq!(fallback, Some(PaneId(1)));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        assert_eq!(session.layout.panes(), vec![PaneId(1)]);
+        assert!(!session.layout.contains(p2));
+        assert!(!session.focus_history.contains(&p2));
+
+        // Remove last pane
+        let last = session.remove_pane(PaneId(1)).unwrap();
+        assert_eq!(last, None);
+        assert_eq!(session.active_pane, None);
+        assert!(session.layout.panes().is_empty());
+    }
+
+    #[test]
+    fn test_session_model_dock_pane() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        assert_eq!(session.layout.panes(), vec![PaneId(1), p2]);
+
+        // Dock p1 to bottom of p2
+        session.dock_pane(PaneId(1), p2, DockPosition::Bottom).unwrap();
+        assert_eq!(session.layout.panes(), vec![p2, PaneId(1)]);
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+    }
+
+    #[test]
+    fn test_session_model_adopt_pane() {
+        let mut session = SessionModel::new(PaneId(1));
+        session.adopt_pane(PaneId(99), PaneId(1), DockPosition::Left).unwrap();
+        assert_eq!(session.layout.panes(), vec![PaneId(99), PaneId(1)]);
+        assert_eq!(session.active_pane, Some(PaneId(99)));
+        assert!(session.next_pane_id().0 > 99);
     }
 }

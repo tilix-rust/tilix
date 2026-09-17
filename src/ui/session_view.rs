@@ -8,8 +8,8 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::model::{
-    AppConfig, ColorScheme, Direction, LayoutNode, LayoutTree, PaneId, PaneTitleStyle, Profile,
-    SessionModel, SplitOrientation,
+    AppConfig, ColorScheme, Direction, DockPosition, LayoutNode, LayoutTree, PaneId,
+    PaneTitleStyle, Profile, SessionModel, SplitOrientation,
 };
 use crate::ui::terminal_pane::TerminalPane;
 
@@ -23,6 +23,7 @@ pub enum SessionAction {
 pub type ActionHandler = Box<dyn Fn(SessionAction)>;
 pub type TitleChangedHandler = Box<dyn Fn(&str)>;
 pub type SwapHandler = Box<dyn Fn(PaneId, PaneId)>;
+pub type DockHandler = Box<dyn Fn(PaneId, PaneId, DockPosition)>;
 
 #[derive(Clone)]
 pub struct SessionView {
@@ -31,7 +32,7 @@ pub struct SessionView {
     model: Rc<RefCell<SessionModel>>,
     action_handler: Rc<RefCell<Option<ActionHandler>>>,
     title_changed_callback: Rc<RefCell<Option<TitleChangedHandler>>>,
-    swap_handler: Rc<RefCell<Option<SwapHandler>>>,
+    dock_handler: Rc<RefCell<Option<DockHandler>>>,
     use_wide_handle: Rc<RefCell<bool>>,
     pane_title_style: Rc<RefCell<PaneTitleStyle>>,
     pane_title_show_when_single: Rc<RefCell<bool>>,
@@ -55,7 +56,12 @@ impl SessionView {
         Self::with_model_and_dir(model, None)
     }
 
-    pub fn with_model_and_dir(model: SessionModel, dir: Option<&Path>) -> Self {
+    pub fn with_existing_pane(pane: TerminalPane) -> Self {
+        let model = SessionModel::new(pane.pane_id());
+        Self::with_model_and_existing_pane(model, pane)
+    }
+
+    pub fn with_model_and_existing_pane(model: SessionModel, pane: TerminalPane) -> Self {
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         container.set_vexpand(true);
         container.set_hexpand(true);
@@ -64,7 +70,7 @@ impl SessionView {
         let panes = Rc::new(RefCell::new(HashMap::new()));
         let action_handler = Rc::new(RefCell::new(None));
         let title_changed_callback = Rc::new(RefCell::new(None));
-        let swap_handler = Rc::new(RefCell::new(None));
+        let dock_handler = Rc::new(RefCell::new(None));
         let cfg = AppConfig::load();
         let use_wide_handle = Rc::new(RefCell::new(cfg.use_wide_handle));
         let pane_title_style = Rc::new(RefCell::new(cfg.pane_title_style));
@@ -76,22 +82,59 @@ impl SessionView {
             model,
             action_handler,
             title_changed_callback,
-            swap_handler,
+            dock_handler,
             use_wide_handle,
             pane_title_style,
             pane_title_show_when_single,
         };
 
-        let panes_c = Rc::clone(&session.panes);
-        let model_c = Rc::clone(&session.model);
-        let container_c = session.container.clone();
-        let use_wide_handle_c = Rc::clone(&session.use_wide_handle);
-        *session.swap_handler.borrow_mut() = Some(Box::new(move |src, dest| {
-            let swapped = model_c.borrow_mut().layout.swap_panes(src, dest).is_ok();
-            if swapped {
-                Self::rebuild_projection_with(&container_c, &panes_c, &model_c, *use_wide_handle_c.borrow());
-            }
-        }));
+        session.setup_dock_handler();
+
+        let pane_id = pane.pane_id();
+        pane.clear_callbacks();
+        Self::wire_pane_callbacks(
+            &pane,
+            &session.panes,
+            &session.model,
+            &session.action_handler,
+            &session.title_changed_callback,
+            &session.dock_handler,
+        );
+        session.panes.borrow_mut().insert(pane_id, pane);
+        session.rebuild_projection();
+        session.set_active_pane(pane_id);
+
+        session
+    }
+
+    pub fn with_model_and_dir(model: SessionModel, dir: Option<&Path>) -> Self {
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        container.set_vexpand(true);
+        container.set_hexpand(true);
+
+        let model = Rc::new(RefCell::new(model));
+        let panes = Rc::new(RefCell::new(HashMap::new()));
+        let action_handler = Rc::new(RefCell::new(None));
+        let title_changed_callback = Rc::new(RefCell::new(None));
+        let dock_handler = Rc::new(RefCell::new(None));
+        let cfg = AppConfig::load();
+        let use_wide_handle = Rc::new(RefCell::new(cfg.use_wide_handle));
+        let pane_title_style = Rc::new(RefCell::new(cfg.pane_title_style));
+        let pane_title_show_when_single = Rc::new(RefCell::new(cfg.pane_title_show_when_single));
+
+        let session = Self {
+            container,
+            panes,
+            model,
+            action_handler,
+            title_changed_callback,
+            dock_handler,
+            use_wide_handle,
+            pane_title_style,
+            pane_title_show_when_single,
+        };
+
+        session.setup_dock_handler();
 
         let pane_ids = session.model.borrow().layout.panes();
         for id in pane_ids {
@@ -102,13 +145,49 @@ impl SessionView {
                 &session.model,
                 &session.action_handler,
                 &session.title_changed_callback,
-                &session.swap_handler,
+                &session.dock_handler,
             );
             session.panes.borrow_mut().insert(id, pane);
         }
 
         session.rebuild_projection();
         session
+    }
+
+    fn setup_dock_handler(&self) {
+        let panes_w = Rc::downgrade(&self.panes);
+        let model_w = Rc::downgrade(&self.model);
+        let action_w = Rc::downgrade(&self.action_handler);
+        let title_w = Rc::downgrade(&self.title_changed_callback);
+        let dock_w = Rc::downgrade(&self.dock_handler);
+        let wide_w = Rc::downgrade(&self.use_wide_handle);
+        let style_w = Rc::downgrade(&self.pane_title_style);
+        let show_w = Rc::downgrade(&self.pane_title_show_when_single);
+        let container = self.container.clone();
+
+        *self.dock_handler.borrow_mut() = Some(Box::new(move |src, dest, pos| {
+            let Some(panes) = panes_w.upgrade() else { return; };
+            let Some(model) = model_w.upgrade() else { return; };
+            let Some(action_handler) = action_w.upgrade() else { return; };
+            let Some(title_changed_callback) = title_w.upgrade() else { return; };
+            let Some(dock_handler) = dock_w.upgrade() else { return; };
+            let Some(use_wide_handle) = wide_w.upgrade() else { return; };
+            let Some(pane_title_style) = style_w.upgrade() else { return; };
+            let Some(pane_title_show_when_single) = show_w.upgrade() else { return; };
+
+            let sv = SessionView {
+                container: container.clone(),
+                panes,
+                model,
+                action_handler,
+                title_changed_callback,
+                dock_handler,
+                use_wide_handle,
+                pane_title_style,
+                pane_title_show_when_single,
+            };
+            sv.dock_pane(src, dest, pos);
+        }));
     }
 
     pub fn set_action_handler<F: Fn(SessionAction) + 'static>(&self, f: F) {
@@ -119,25 +198,24 @@ impl SessionView {
         *self.title_changed_callback.borrow_mut() = Some(Box::new(f));
     }
 
-    fn create_pane(
-        id: PaneId,
-        initial_directory: Option<&Path>,
+    pub fn set_dock_handler<F: Fn(PaneId, PaneId, DockPosition) + 'static>(&self, f: F) {
+        *self.dock_handler.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn wire_pane_callbacks(
+        pane: &TerminalPane,
         panes: &Rc<RefCell<HashMap<PaneId, TerminalPane>>>,
         model: &Rc<RefCell<SessionModel>>,
         action_handler: &Rc<RefCell<Option<ActionHandler>>>,
         title_changed_callback: &Rc<RefCell<Option<TitleChangedHandler>>>,
-        swap_handler: &Rc<RefCell<Option<SwapHandler>>>,
-    ) -> TerminalPane {
-        let pane = TerminalPane::new(id, initial_directory);
-        let cfg = crate::model::AppConfig::load();
-        pane.apply_profile(&cfg.default_profile);
-
+        dock_handler: &Rc<RefCell<Option<DockHandler>>>,
+    ) {
         pane.setup_drag_source();
-        let swap_cb = Rc::clone(swap_handler);
-        pane.setup_drop_target(move |src, dest| {
-            if let Ok(cb_ref) = swap_cb.try_borrow() {
+        let dock_cb = Rc::clone(dock_handler);
+        pane.setup_drop_target(move |src, dest, pos| {
+            if let Ok(cb_ref) = dock_cb.try_borrow() {
                 if let Some(ref cb) = *cb_ref {
-                    cb(src, dest);
+                    cb(src, dest, pos);
                 }
             }
         });
@@ -277,6 +355,29 @@ impl SessionView {
                 }
             }
         });
+    }
+
+    fn create_pane(
+        id: PaneId,
+        initial_directory: Option<&Path>,
+        panes: &Rc<RefCell<HashMap<PaneId, TerminalPane>>>,
+        model: &Rc<RefCell<SessionModel>>,
+        action_handler: &Rc<RefCell<Option<ActionHandler>>>,
+        title_changed_callback: &Rc<RefCell<Option<TitleChangedHandler>>>,
+        dock_handler: &Rc<RefCell<Option<DockHandler>>>,
+    ) -> TerminalPane {
+        let pane = TerminalPane::new(id, initial_directory);
+        let cfg = crate::model::AppConfig::load();
+        pane.apply_profile(&cfg.default_profile);
+
+        Self::wire_pane_callbacks(
+            &pane,
+            panes,
+            model,
+            action_handler,
+            title_changed_callback,
+            dock_handler,
+        );
 
         pane
     }
@@ -342,7 +443,7 @@ impl SessionView {
             &self.model,
             &self.action_handler,
             &self.title_changed_callback,
-            &self.swap_handler,
+            &self.dock_handler,
         );
         self.panes.borrow_mut().insert(initial_pane_id, pane);
         self.rebuild_projection();
@@ -418,6 +519,61 @@ impl SessionView {
         }
     }
 
+    pub fn remove_pane_for_transfer(&self, id: PaneId) -> Option<TerminalPane> {
+        if !self.panes.borrow().contains_key(&id) {
+            return None;
+        }
+        let next_focus = self.model.borrow_mut().remove_pane(id).ok().flatten();
+        let pane = self.panes.borrow_mut().remove(&id)?;
+        Self::detach_widget(pane.widget());
+        if let Some(act_id) = next_focus {
+            self.set_active_pane(act_id);
+        }
+        Some(pane)
+    }
+
+    pub fn adopt_pane(&self, pane: TerminalPane, target_id: PaneId, position: DockPosition) {
+        let pane_id = pane.pane_id();
+        pane.clear_callbacks();
+        Self::wire_pane_callbacks(
+            &pane,
+            &self.panes,
+            &self.model,
+            &self.action_handler,
+            &self.title_changed_callback,
+            &self.dock_handler,
+        );
+        self.panes.borrow_mut().insert(pane_id, pane);
+        let _ = self.model.borrow_mut().adopt_pane(pane_id, target_id, position);
+        self.rebuild_projection();
+        self.set_active_pane(pane_id);
+    }
+
+    pub fn dock_pane(&self, src_id: PaneId, dest_id: PaneId, position: DockPosition) {
+        if self.panes.borrow().contains_key(&src_id) {
+            let res = self.model.borrow_mut().dock_pane(src_id, dest_id, position);
+            if res.is_ok() {
+                self.rebuild_projection();
+                self.set_active_pane(src_id);
+            }
+        } else {
+            let Some(drag) = crate::ui::dnd::get_active_pane_drag() else { return; };
+            if drag.pane_id != src_id {
+                return;
+            }
+            let Some(source_widget) = drag.source_session_widget.upgrade() else { return; };
+            let Some(source_session_rc) = crate::ui::window::session_for_widget(&source_widget) else { return; };
+
+            let Some(pane) = source_session_rc.borrow().remove_pane_for_transfer(src_id) else { return; };
+            source_session_rc.borrow().rebuild_projection();
+            if source_session_rc.borrow().is_empty() {
+                crate::ui::window::close_session_tab(&source_widget);
+            }
+
+            self.adopt_pane(pane, dest_id, position);
+        }
+    }
+
     pub fn grab_focus(&self) {
         if let Some(id) = self.model.borrow().active_pane {
             if let Some(pane) = self.panes.borrow().get(&id) {
@@ -464,7 +620,7 @@ impl SessionView {
                 &self.model,
                 &self.action_handler,
                 &self.title_changed_callback,
-                &self.swap_handler,
+                &self.dock_handler,
             );
             self.panes.borrow_mut().insert(new_id, new_pane);
             self.rebuild_projection();
@@ -696,7 +852,7 @@ impl SessionView {
         }
     }
 
-    fn rebuild_projection(&self) {
+    pub fn rebuild_projection(&self) {
         Self::rebuild_projection_with(
             &self.container,
             &self.panes,
@@ -954,6 +1110,49 @@ mod tests {
             }
 
             session.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_dock_intra_session() {
+        crate::ui::window::run_gtk_test(|| {
+            let session = SessionView::new();
+            let p1 = session.active_pane_id().unwrap();
+            session.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session.pane_count(), 2);
+            let p2 = session.active_pane_id().unwrap();
+
+            session.dock_pane(p1, p2, DockPosition::Bottom);
+            assert_eq!(session.pane_count(), 2);
+            assert_eq!(session.active_pane_id(), Some(p1));
+            assert_eq!(session.model().layout.panes(), vec![p2, p1]);
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_transfer_pane() {
+        crate::ui::window::run_gtk_test(|| {
+            let session_a = SessionView::with_id(PaneId(1));
+            session_a.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session_a.pane_count(), 2);
+            let p2 = session_a.active_pane_id().unwrap();
+
+            let session_b = SessionView::with_id(PaneId(10));
+            assert_eq!(session_b.pane_count(), 1);
+
+            let pane_to_transfer = session_a.remove_pane_for_transfer(p2).unwrap();
+            session_a.rebuild_projection();
+            assert_eq!(session_a.pane_count(), 1);
+
+            session_b.adopt_pane(pane_to_transfer, PaneId(10), DockPosition::Right);
+            assert_eq!(session_b.pane_count(), 2);
+            assert_eq!(session_b.active_pane_id(), Some(p2));
+            assert_eq!(session_b.model().layout.panes(), vec![PaneId(10), p2]);
+
+            session_a.close();
+            session_b.close();
         });
     }
 }

@@ -1,7 +1,7 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.7.0 (Phase 7 Final Architecture)  
+**Version:** 0.8.0 (Phase 8 Final Architecture)  
 **Date:** 2026-09-17  
 
 
@@ -49,19 +49,22 @@ flowchart TD
 
     subgraph UI_Layer ["UI Layer (GTK4 + Libadwaita)"]
         Win["TilixWindow (Standard Window)"]
+        Win2["TilixWindow (Detached Window)"]
         QuakeWin["TilixQuakeWindow (Drop-Down Window)"]
         PrefWin["AdwPreferencesWindow (Preferences Dialog)"]
         TabBar["AdwTabBar (autohide = true)"]
         TabView["AdwTabView (Multi-Session & Tab DND)"]
-        SV1["SessionView"]
-        TP1["TerminalPane 1<br/>(Header Visibility + DND)"]
-        TP2["TerminalPane 2<br/>(Header Visibility + DND)"]
+        SV1["SessionView 1"]
+        SV2["SessionView 2"]
+        TP1["TerminalPane 1<br/>(Overlay + 5-Zone DND)"]
+        TP2["TerminalPane 2<br/>(Overlay + 5-Zone DND)"]
+        TP3["TerminalPane 3<br/>(Overlay + 5-Zone DND)"]
     end
 
     subgraph Domain_Model ["Headless Domain Model (Pure Rust)"]
-        SM["SessionModel"]
-        LT["LayoutTree (swap_panes, set_split_ratio)"]
-        Cfg["AppConfig (WindowStyle, WideHandle, PaneTitleStyle, ShowWhenSingle)"]
+        SM["SessionModel (adopt_pane, remove_pane)"]
+        LT["LayoutTree (dock_pane, insert_pane_dock, calculate_dock_position)"]
+        Cfg["AppConfig (WindowStyle, WideHandle, PaneTitleStyle, Keybindings)"]
         Prof["Profile / ColorScheme"]
         OSC7["parse_osc7_uri(uri)"]
     end
@@ -69,6 +72,7 @@ flowchart TD
     subgraph System_Integration ["System & Desktop Integration"]
         GNotif["GIO Desktop Notifications (Dynamic Titles)"]
         CWD["OSC 7 Working Directory Inheritance"]
+        DND_Reg["ACTIVE_PANE_DRAG (Thread-Local Process Registry)"]
     end
 
     Desktop --> GApp
@@ -80,10 +84,17 @@ flowchart TD
     TabView <-->|Tab DND / Detach| Win
     TabView --> SV1
     QuakeWin --> SV1
-    SV1 -->|Controls Header Visibility| TP1
-    SV1 -->|Controls Header Visibility| TP2
+    SV1 -->|Controls Header & Overlay| TP1
+    SV1 -->|Controls Header & Overlay| TP2
 
-    TP1 <-->|DND Pane Swap| TP2
+    TP1 <-->|5-Zone Directional Docking & Reparenting| TP2
+    TP2 -.->|Drag to Desktop Detach| Win2
+    TP2 -.->|Cross-Session Drag| SV2
+    SV2 --> TP3
+    TP1 -.->|Registers Active Drag| DND_Reg
+    DND_Reg -.->|Provides Transfer Context| Win2
+    DND_Reg -.->|Provides Transfer Context| SV2
+
     SV1 <-->|Syncs| SM
     SM --> LT
     PrefWin -.->|Updates Profile, Style, Wide Handle & Pane Title| Cfg
@@ -123,6 +134,15 @@ pub enum Direction {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockPosition {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Center,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LayoutNode {
     Leaf(PaneId),
@@ -148,8 +168,11 @@ pub struct LayoutTree {
 4. **Closing & Collapsing:** Finds the parent split of `Leaf(target)` and promotes the sibling branch.
 5. **Balancing:** Recursively resets split ratios based on leaf counts.
 6. **Dynamic Split Ratio Updates:** `set_split_ratio(split_id: SplitId, ratio: f64) -> bool` updates ratios dynamically.
-7. **Pane Swapping (for DND):** `swap_panes(&mut self, a: PaneId, b: PaneId) -> Result<(), LayoutError>` swaps positions of two leaf panes while preserving tree topology.
-8. **Geometric Directional Navigation:** Computes normalized 2D bounding boxes `[0.0, 1.0] x [0.0, 1.0]` of all leaves and ray-casts perpendicular intervals.
+7. **Pane Swapping (for Center Docking):** `swap_panes(&mut self, a: PaneId, b: PaneId) -> Result<(), LayoutError>` swaps positions of two leaf panes while preserving tree topology.
+8. **Directional Docking (Intra-Tree):** `dock_pane(&mut self, source: PaneId, target: PaneId, position: DockPosition) -> Result<(), LayoutError>` excises source from the tree and redocks it adjacent to target or swaps if `Center`.
+9. **Dynamic Dock Insertion (External):** `insert_pane_dock(&mut self, new_pane: PaneId, target: PaneId, position: DockPosition) -> Result<(), LayoutError>` docks an external pane into the tree.
+10. **5-Zone Mathematical Docking Calculation:** `calculate_dock_position(x, y, w, h) -> DockPosition` computes normalized coordinates and evaluates center rectangle `[0.25, 0.75]` vs closest edge.
+11. **Geometric Directional Navigation:** Computes normalized 2D bounding boxes `[0.0, 1.0] x [0.0, 1.0]` of all leaves and ray-casts perpendicular intervals.
 
 ---
 
@@ -173,7 +196,7 @@ When `LayoutTree` changes (split, close, rebalance, swap):
 
 ## 5. PTY & VTE Integration
 
-- **TerminalPane Composition:** Composite vertical `gtk::Box` wrapping a header bar (title, sync toggle, drag handle, split/close buttons) and a `vte4::Terminal`.
+- **TerminalPane Composition:** Wrapped in a root `gtk::Overlay` containing the composite vertical `gtk::Box` (header bar with title, sync toggle, drag handle, split/close buttons, and `vte4::Terminal`) and an overlay child (`.drop-indicator-overlay`) dynamically sized and positioned for 5-zone docking.
 - **Shell Spawning & CWD Inheritance:** Spawns child shells asynchronously in the target directory (passed via OSC 7 or falling back to `$PWD` / `$HOME`).
 - **Environment:** Sets `TERM=xterm-256color`, `COLORTERM=truecolor`.
 
@@ -402,3 +425,85 @@ Phase 7 introduces complete user customization of keyboard shortcuts, featuring 
   - Escape cancels the dialog; Backspace/Delete unbinds the shortcut.
   - Live preview with real-time conflict checking and warning banners.
   - "Set" / "Apply" and "Disable Shortcut" actions trigger config saving and global live rebinding.
+
+---
+
+## 20. Advanced Pane Drag-and-Drop, Directional Docking & Window Detach Architecture (Phase 8)
+
+Phase 8 elevates Tilix's tiling ergonomics to parity with modern tiling IDEs and classic Tilix, introducing 5-zone directional docking, visual drop indicator overlays, live cross-session/cross-window pane transfers, and drag-to-desktop window detachment with zero child shell process interruption.
+
+### 20.1 5-Zone Mathematical Docking Model (`src/model/layout.rs`)
+- **`DockPosition` Enum:** Algebraic enumeration (`Top`, `Bottom`, `Left`, `Right`, `Center`) representing the five directional drop targets.
+- **Zone Geometry (`calculate_dock_position(x, y, width, height)`):**
+  - Normalizes pointer coordinates: $nx = \text{clamp}(x / w, 0.0, 1.0)$, $ny = \text{clamp}(y / h, 0.0, 1.0)$.
+  - **Center Zone:** Defined by the bounding rectangle $[0.25, 0.75] \times [0.25, 0.75]$. If $0.25 \le nx \le 0.75$ and $0.25 \le ny \le 0.75$, evaluates to `DockPosition::Center` (triggering pane swap).
+  - **Peripheral Zones:** For coordinates outside the center box, evaluates the minimum distance to the four outer boundaries:
+    - $d_{\text{top}} = ny$
+    - $d_{\text{bottom}} = 1.0 - ny$
+    - $d_{\text{left}} = nx$
+    - $d_{\text{right}} = 1.0 - nx$
+  - The minimal distance unequivocally selects `Top`, `Bottom`, `Left`, or `Right`.
+  - Degenerate dimensions ($w \le 0$ or $h \le 0$) fall back safely to `DockPosition::Center`.
+  - Pure Rust implementation with zero GTK dependencies, enabling 100% headless CI testability.
+
+### 20.2 Headless Layout Tree Docking & Dynamic Insertion
+- **Intra-Tree Docking (`LayoutTree::dock_pane`):**
+  - Replaces source pane with its sibling via `self.close(source)`.
+  - Re-inserts source adjacent to target via `self.insert_pane_dock(source, target, position)`.
+  - `DockPosition::Center` delegates directly to `self.swap_panes(source, target)`.
+  - Docking onto self (`source == target`) is a safe no-op.
+- **Dynamic Dock Insertion (`LayoutTree::insert_pane_dock`):**
+  - Replaces `target` leaf with a new `LayoutNode::Split`:
+    - `Left`: Split orientation `Horizontal`, `first: Leaf(new_pane)`, `second: Leaf(target)`.
+    - `Right`: Split orientation `Horizontal`, `first: Leaf(target)`, `second: Leaf(new_pane)`.
+    - `Top`: Split orientation `Vertical`, `first: Leaf(new_pane)`, `second: Leaf(target)`.
+    - `Bottom`: Split orientation `Vertical`, `first: Leaf(target)`, `second: Leaf(new_pane)`.
+  - Split ratio defaults to 0.5.
+- **Session Model Synchronization (`SessionModel`):**
+  - `remove_pane(id)`: Excises pane from `layout`, `sync_groups`, `pane_sync_overrides`, and `focus_history`, cleanly returning the fallback active pane according to MRU focus ordering.
+  - `adopt_pane(new_pane, target, position)`: Integrates external pane into `layout`, adds it to `focus_history`, and marks it active.
+
+### 20.3 Visual Drop Indicator Overlay (`src/ui/terminal_pane.rs`)
+- **Overlay Hierarchy:** `TerminalPane` wraps its vertical container inside a `gtk::Overlay`.
+  - Overlay child: `.drop-indicator-overlay` (`gtk::Box`).
+  - Marked `can_target = false` to ensure pointer events pass through transparently to underlying drag and drop controllers.
+- **Dynamic Geometry & Alignment:**
+  - `show_drop_indicator(position)`:
+    - `Top`: `halign = Fill`, `valign = Start`, size $(-1, H / 2)$.
+    - `Bottom`: `halign = Fill`, `valign = End`, size $(-1, H / 2)$.
+    - `Left`: `halign = Start`, `valign = Fill`, size $(W / 2, -1)$.
+    - `Right`: `halign = End`, `valign = Fill`, size $(W / 2, -1)$.
+    - `Center`: `halign = Fill`, `valign = Fill`, size $(-1, -1)$.
+  - `hide_drop_indicator()`: Sets indicator visibility to `false`.
+- **CSS Styling (`src/ui/window.rs`):**
+  - Styled with `alpha(@accent_color, 0.35)` background and `2px solid @accent_color` border with rounded corners.
+
+### 20.4 DND Protocol & Process-Wide Active Drag Registry (`src/ui/dnd.rs`)
+- **Active Drag Registry:**
+  - `ActivePaneDrag`: Encapsulates `pane_id`, weak reference `source_session_widget: glib::WeakRef<gtk::Widget>`, and cloned `pane: TerminalPane`.
+  - Thread-local `ACTIVE_PANE_DRAG: RefCell<Option<ActivePaneDrag>>` tracks the pane in flight across windows.
+- **`gtk::DragSource` Lifecycle:**
+  - `prepare`: Sets `ACTIVE_PANE_DRAG` with the dragged pane and source session widget; provides `pane_id.0.to_value()`.
+  - `drag_cancel`: Intercepts `gdk::DragCancelReason::NoTarget` (drop on desktop background) to trigger window detachment.
+  - `drag_end`: Clears `ACTIVE_PANE_DRAG`.
+- **`gtk::DropTarget` Lifecycle:**
+  - `motion`: Checks if dragging over self (if so, hides overlay). Otherwise calculates `calculate_dock_position(x, y, w, h)`, activates `show_drop_indicator(pos)`, and returns `DragAction::MOVE`.
+  - `leave`: Hides drop indicator overlay.
+  - `drop`: Hides overlay, recalculates position, and fires `on_dock(src_id, dest_id, position)`.
+
+### 20.5 Cross-Session & Cross-Window Reparenting (`src/ui/session_view.rs`)
+- **Zero Process Interruption:**
+  - `remove_pane_for_transfer(id)`: Removes pane from `panes` map and `model`, then calls `SessionView::detach_widget(pane.widget())`. The underlying `vte4::Terminal`, its master PTY, and child PID remain running and uninterrupted.
+  - `pane.clear_callbacks()`: Clears all closures holding references to the source session, preventing stale closures or use-after-free.
+  - `adopt_pane(pane, target_id, position)`: Inserts pane into destination `panes` map, wires UI callbacks to the target session, inserts into `model`, and invokes `rebuild_projection()`.
+- **Automatic Empty Session Cleanup:**
+  - If a pane transfer leaves the source session empty (`is_empty()`), the source window automatically closes the corresponding tab page via `crate::ui::window::close_session_tab`. If that was the last tab, the source window closes automatically.
+
+### 20.6 Window Detachment on Desktop Drop (`src/ui/window.rs`)
+- **Single-Pane Safety Guard:**
+  - `detach_drag_to_new_window` checks the total pane count across all tabs in the source window. If `total_panes <= 1`, detachment is aborted, preventing accidental destruction of the user's sole terminal window.
+- **Detached Window Spawning:**
+  - Excises the pane via `source_session.remove_pane_for_transfer(pane_id)`.
+  - Instantiates a new empty window via `TilixWindow::new_empty(&app)`.
+  - Mounts the existing pane via `create_tab_with_existing_pane(pane)` without restarting the shell.
+  - Presents the newly detached window to the user.

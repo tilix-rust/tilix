@@ -19,6 +19,43 @@ pub enum Direction {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockPosition {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Center,
+}
+
+pub fn calculate_dock_position(x: f64, y: f64, width: f64, height: f64) -> DockPosition {
+    if width <= 0.0 || height <= 0.0 {
+        return DockPosition::Center;
+    }
+
+    let nx = (x / width).clamp(0.0, 1.0);
+    let ny = (y / height).clamp(0.0, 1.0);
+
+    if (0.25..=0.75).contains(&nx) && (0.25..=0.75).contains(&ny) {
+        return DockPosition::Center;
+    }
+
+    let d_top = ny;
+    let d_bottom = 1.0 - ny;
+    let d_left = nx;
+    let d_right = 1.0 - nx;
+
+    if d_top <= d_bottom && d_top <= d_left && d_top <= d_right {
+        DockPosition::Top
+    } else if d_bottom <= d_left && d_bottom <= d_right {
+        DockPosition::Bottom
+    } else if d_left <= d_right {
+        DockPosition::Left
+    } else {
+        DockPosition::Right
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum LayoutError {
     #[error("Pane ID {0:?} not found in layout tree")]
@@ -111,6 +148,43 @@ impl LayoutNode {
                     return Ok(true);
                 }
                 second.split_leaf(target, orientation, new_pane, split_id)
+            }
+        }
+    }
+
+    fn insert_dock_leaf(
+        &mut self,
+        new_pane: PaneId,
+        target: PaneId,
+        position: DockPosition,
+        split_id: SplitId,
+    ) -> Result<bool, LayoutError> {
+        match self {
+            LayoutNode::Leaf(id) if *id == target => {
+                let target_leaf = Box::new(LayoutNode::Leaf(*id));
+                let new_leaf = Box::new(LayoutNode::Leaf(new_pane));
+                let (orientation, first, second) = match position {
+                    DockPosition::Left => (SplitOrientation::Horizontal, new_leaf, target_leaf),
+                    DockPosition::Right => (SplitOrientation::Horizontal, target_leaf, new_leaf),
+                    DockPosition::Top => (SplitOrientation::Vertical, new_leaf, target_leaf),
+                    DockPosition::Bottom => (SplitOrientation::Vertical, target_leaf, new_leaf),
+                    DockPosition::Center => return Err(LayoutError::InvalidSplit),
+                };
+                *self = LayoutNode::Split {
+                    id: split_id,
+                    orientation,
+                    ratio: 0.5,
+                    first,
+                    second,
+                };
+                Ok(true)
+            }
+            LayoutNode::Leaf(_) => Ok(false),
+            LayoutNode::Split { first, second, .. } => {
+                if first.insert_dock_leaf(new_pane, target, position, split_id)? {
+                    return Ok(true);
+                }
+                second.insert_dock_leaf(new_pane, target, position, split_id)
             }
         }
     }
@@ -415,6 +489,57 @@ impl LayoutTree {
             root.swap_panes(a, b);
         }
         Ok(())
+    }
+
+    pub fn insert_pane_dock(
+        &mut self,
+        new_pane: PaneId,
+        target: PaneId,
+        position: DockPosition,
+    ) -> Result<(), LayoutError> {
+        if position == DockPosition::Center {
+            return Err(LayoutError::InvalidSplit);
+        }
+        if self.contains(new_pane) {
+            return Err(LayoutError::InvalidSplit);
+        }
+        if !self.contains(target) {
+            return Err(LayoutError::PaneNotFound(target));
+        }
+
+        let split_id = self.next_split_id();
+        let Some(ref mut root) = self.root else {
+            return Err(LayoutError::PaneNotFound(target));
+        };
+
+        let found = root.insert_dock_leaf(new_pane, target, position, split_id)?;
+        if found {
+            Ok(())
+        } else {
+            Err(LayoutError::PaneNotFound(target))
+        }
+    }
+
+    pub fn dock_pane(
+        &mut self,
+        source: PaneId,
+        target: PaneId,
+        position: DockPosition,
+    ) -> Result<(), LayoutError> {
+        if source == target {
+            return Ok(());
+        }
+        if !self.contains(source) {
+            return Err(LayoutError::PaneNotFound(source));
+        }
+        if !self.contains(target) {
+            return Err(LayoutError::PaneNotFound(target));
+        }
+        if position == DockPosition::Center {
+            return self.swap_panes(source, target);
+        }
+        self.close(source)?;
+        self.insert_pane_dock(source, target, position)
     }
 
     pub fn balance(&mut self) {
@@ -893,6 +1018,130 @@ mod tests {
         assert_eq!(
             tree.swap_panes(PaneId(99), PaneId(1)),
             Err(LayoutError::PaneNotFound(PaneId(99)))
+        );
+    }
+
+    #[test]
+    fn test_dock_position_variants() {
+        assert_eq!(DockPosition::Top, DockPosition::Top);
+        assert_eq!(DockPosition::Bottom, DockPosition::Bottom);
+        assert_eq!(DockPosition::Left, DockPosition::Left);
+        assert_eq!(DockPosition::Right, DockPosition::Right);
+        assert_eq!(DockPosition::Center, DockPosition::Center);
+        assert_ne!(DockPosition::Top, DockPosition::Bottom);
+        assert_eq!(format!("{:?}", DockPosition::Top), "Top");
+        assert_eq!(format!("{:?}", DockPosition::Center), "Center");
+    }
+
+    #[test]
+    fn test_calculate_dock_position_center_zone() {
+        assert_eq!(calculate_dock_position(50.0, 50.0, 100.0, 100.0), DockPosition::Center);
+        assert_eq!(calculate_dock_position(30.0, 30.0, 100.0, 100.0), DockPosition::Center);
+        assert_eq!(calculate_dock_position(70.0, 70.0, 100.0, 100.0), DockPosition::Center);
+        assert_eq!(calculate_dock_position(25.0, 25.0, 100.0, 100.0), DockPosition::Center);
+        assert_eq!(calculate_dock_position(75.0, 75.0, 100.0, 100.0), DockPosition::Center);
+    }
+
+    #[test]
+    fn test_calculate_dock_position_directional_zones() {
+        assert_eq!(calculate_dock_position(50.0, 5.0, 100.0, 100.0), DockPosition::Top);
+        assert_eq!(calculate_dock_position(50.0, 95.0, 100.0, 100.0), DockPosition::Bottom);
+        assert_eq!(calculate_dock_position(5.0, 50.0, 100.0, 100.0), DockPosition::Left);
+        assert_eq!(calculate_dock_position(95.0, 50.0, 100.0, 100.0), DockPosition::Right);
+    }
+
+    #[test]
+    fn test_calculate_dock_position_boundary_clamping() {
+        // Negative coordinates outside box clamp to nearest boundary
+        assert_eq!(calculate_dock_position(-10.0, 50.0, 100.0, 100.0), DockPosition::Left);
+        assert_eq!(calculate_dock_position(50.0, -10.0, 100.0, 100.0), DockPosition::Top);
+        // Beyond dimensions clamp to right / bottom
+        assert_eq!(calculate_dock_position(150.0, 50.0, 100.0, 100.0), DockPosition::Right);
+        assert_eq!(calculate_dock_position(50.0, 150.0, 100.0, 100.0), DockPosition::Bottom);
+        // Zero or negative dimensions default safely to Center
+        assert_eq!(calculate_dock_position(10.0, 10.0, 0.0, 100.0), DockPosition::Center);
+        assert_eq!(calculate_dock_position(10.0, 10.0, 100.0, 0.0), DockPosition::Center);
+        assert_eq!(calculate_dock_position(10.0, 10.0, -50.0, -50.0), DockPosition::Center);
+    }
+
+    #[test]
+    fn test_layout_tree_dock_pane_intra_tree_directions() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2)).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
+
+        // Dock P1 to Right of P2 -> order should be [P2, P1] with Horizontal orientation
+        tree.dock_pane(PaneId(1), PaneId(2), DockPosition::Right).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(2), PaneId(1)]);
+        if let Some(LayoutNode::Split { orientation, .. }) = tree.root() {
+            assert_eq!(*orientation, SplitOrientation::Horizontal);
+        } else {
+            panic!("Expected split root");
+        }
+
+        // Dock P1 to Top of P2 -> order should be [P1, P2] with Vertical orientation
+        tree.dock_pane(PaneId(1), PaneId(2), DockPosition::Top).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
+        if let Some(LayoutNode::Split { orientation, .. }) = tree.root() {
+            assert_eq!(*orientation, SplitOrientation::Vertical);
+        } else {
+            panic!("Expected split root");
+        }
+
+        // Dock P1 to Bottom of P2 -> order should be [P2, P1] with Vertical orientation
+        tree.dock_pane(PaneId(1), PaneId(2), DockPosition::Bottom).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(2), PaneId(1)]);
+        if let Some(LayoutNode::Split { orientation, .. }) = tree.root() {
+            assert_eq!(*orientation, SplitOrientation::Vertical);
+        } else {
+            panic!("Expected split root");
+        }
+
+        // Dock P1 to Left of P2 -> order should be [P1, P2] with Horizontal orientation
+        tree.dock_pane(PaneId(1), PaneId(2), DockPosition::Left).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
+        if let Some(LayoutNode::Split { orientation, .. }) = tree.root() {
+            assert_eq!(*orientation, SplitOrientation::Horizontal);
+        } else {
+            panic!("Expected split root");
+        }
+    }
+
+    #[test]
+    fn test_layout_tree_dock_pane_center_swaps() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2)).unwrap();
+        tree.dock_pane(PaneId(1), PaneId(2), DockPosition::Center).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(2), PaneId(1)]);
+    }
+
+    #[test]
+    fn test_layout_tree_dock_pane_self_noop() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2)).unwrap();
+        tree.dock_pane(PaneId(1), PaneId(1), DockPosition::Top).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
+    }
+
+    #[test]
+    fn test_layout_tree_insert_pane_dock_external() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.insert_pane_dock(PaneId(2), PaneId(1), DockPosition::Right).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(2)]);
+
+        tree.insert_pane_dock(PaneId(3), PaneId(2), DockPosition::Top).unwrap();
+        assert_eq!(tree.panes(), vec![PaneId(1), PaneId(3), PaneId(2)]);
+
+        // Inserting existing pane should fail
+        assert_eq!(
+            tree.insert_pane_dock(PaneId(1), PaneId(2), DockPosition::Left),
+            Err(LayoutError::InvalidSplit)
+        );
+
+        // Center is invalid for insert
+        assert_eq!(
+            tree.insert_pane_dock(PaneId(4), PaneId(2), DockPosition::Center),
+            Err(LayoutError::InvalidSplit)
         );
     }
 }

@@ -7,7 +7,10 @@ use gtk::prelude::*;
 use vte4 as vte;
 use vte::prelude::*;
 
-use crate::model::{ColorScheme, CursorBlinkPreference, CursorShapePreference, PaneId, Profile, SplitOrientation};
+use crate::model::{
+    ColorScheme, CursorBlinkPreference, CursorShapePreference, DockPosition, PaneId, Profile,
+    SplitOrientation,
+};
 use crate::pty::{default_env, detect_shell, parse_osc7_uri};
 
 type CloseCallback = Box<dyn Fn(PaneId)>;
@@ -18,9 +21,12 @@ type TitleCallback = Box<dyn Fn(PaneId, &str)>;
 type SyncToggleCallback = Box<dyn Fn(PaneId, bool)>;
 type BellCallback = Box<dyn Fn(PaneId)>;
 type ChildExitCallback = Box<dyn Fn(PaneId, i32)>;
+type DockCallback = Box<dyn Fn(PaneId, PaneId, DockPosition)>;
 
 #[derive(Clone)]
 pub struct TerminalPane {
+    overlay: gtk::Overlay,
+    drop_indicator: gtk::Box,
     container: gtk::Box,
     header: gtk::Box,
     title_label: gtk::Label,
@@ -41,6 +47,9 @@ pub struct TerminalPane {
     sync_toggled_callbacks: Rc<RefCell<Vec<SyncToggleCallback>>>,
     bell_callbacks: Rc<RefCell<Vec<BellCallback>>>,
     child_exit_callbacks: Rc<RefCell<Vec<ChildExitCallback>>>,
+    dock_callback: Rc<RefCell<Option<DockCallback>>>,
+    drag_source_initialized: Rc<Cell<bool>>,
+    drop_target_initialized: Rc<Cell<bool>>,
 }
 
 impl TerminalPane {
@@ -51,10 +60,6 @@ impl TerminalPane {
         // Header container
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         header.add_css_class("terminal-pane-header");
-        header.set_margin_start(6);
-        header.set_margin_end(6);
-        header.set_margin_top(2);
-        header.set_margin_bottom(2);
 
         let title_label = gtk::Label::new(Some("Terminal"));
         title_label.set_halign(gtk::Align::Start);
@@ -110,6 +115,15 @@ impl TerminalPane {
 
         container.append(&header);
         container.append(&terminal);
+
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&container));
+
+        let drop_indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        drop_indicator.add_css_class("drop-indicator-overlay");
+        drop_indicator.set_can_target(false);
+        drop_indicator.set_visible(false);
+        overlay.add_overlay(&drop_indicator);
 
         let current_directory = Rc::new(RefCell::new(initial_directory.map(|p| p.to_path_buf())));
         let is_sync_enabled = Rc::new(Cell::new(true));
@@ -288,6 +302,8 @@ impl TerminalPane {
         );
 
         Self {
+            overlay,
+            drop_indicator,
             container,
             header,
             title_label,
@@ -308,6 +324,9 @@ impl TerminalPane {
             sync_toggled_callbacks,
             bell_callbacks,
             child_exit_callbacks,
+            dock_callback: Rc::new(RefCell::new(None)),
+            drag_source_initialized: Rc::new(Cell::new(false)),
+            drop_target_initialized: Rc::new(Cell::new(false)),
         }
     }
 
@@ -348,7 +367,11 @@ impl TerminalPane {
     }
 
     pub fn widget(&self) -> &gtk::Widget {
-        self.container.upcast_ref()
+        self.overlay.upcast_ref()
+    }
+
+    pub fn overlay(&self) -> &gtk::Overlay {
+        &self.overlay
     }
 
     pub fn terminal(&self) -> &vte::Terminal {
@@ -497,11 +520,26 @@ impl TerminalPane {
     }
 
     pub fn setup_drag_source(&self) {
-        crate::ui::dnd::setup_pane_drag_source(&self.header, self.pane_id);
+        if self.drag_source_initialized.get() {
+            return;
+        }
+        self.drag_source_initialized.set(true);
+        crate::ui::dnd::setup_pane_drag_source(&self.header, self.clone());
     }
 
-    pub fn setup_drop_target<F: Fn(PaneId, PaneId) + 'static>(&self, on_swap: F) {
-        crate::ui::dnd::setup_pane_drop_target(&self.container, self.pane_id, on_swap);
+    pub fn setup_drop_target<F: Fn(PaneId, PaneId, DockPosition) + 'static>(&self, on_dock: F) {
+        *self.dock_callback.borrow_mut() = Some(Box::new(on_dock));
+        if self.drop_target_initialized.get() {
+            return;
+        }
+        self.drop_target_initialized.set(true);
+        let dock_cb = Rc::clone(&self.dock_callback);
+        let pane = self.clone();
+        crate::ui::dnd::setup_pane_drop_target(&self.overlay, pane, move |src, dest, pos| {
+            if let Some(ref cb) = *dock_cb.borrow() {
+                cb(src, dest, pos);
+            }
+        });
     }
 
     pub fn set_header_visible(&self, visible: bool) {
@@ -510,6 +548,61 @@ impl TerminalPane {
 
     pub fn is_header_visible(&self) -> bool {
         self.header.get_visible()
+    }
+
+    pub fn show_drop_indicator(&self, position: DockPosition) {
+        match position {
+            DockPosition::Top => {
+                self.drop_indicator.set_halign(gtk::Align::Fill);
+                self.drop_indicator.set_valign(gtk::Align::Start);
+                let h = (self.overlay.height() / 2).max(20);
+                self.drop_indicator.set_size_request(-1, h);
+            }
+            DockPosition::Bottom => {
+                self.drop_indicator.set_halign(gtk::Align::Fill);
+                self.drop_indicator.set_valign(gtk::Align::End);
+                let h = (self.overlay.height() / 2).max(20);
+                self.drop_indicator.set_size_request(-1, h);
+            }
+            DockPosition::Left => {
+                self.drop_indicator.set_halign(gtk::Align::Start);
+                self.drop_indicator.set_valign(gtk::Align::Fill);
+                let w = (self.overlay.width() / 2).max(20);
+                self.drop_indicator.set_size_request(w, -1);
+            }
+            DockPosition::Right => {
+                self.drop_indicator.set_halign(gtk::Align::End);
+                self.drop_indicator.set_valign(gtk::Align::Fill);
+                let w = (self.overlay.width() / 2).max(20);
+                self.drop_indicator.set_size_request(w, -1);
+            }
+            DockPosition::Center => {
+                self.drop_indicator.set_halign(gtk::Align::Fill);
+                self.drop_indicator.set_valign(gtk::Align::Fill);
+                self.drop_indicator.set_size_request(-1, -1);
+            }
+        }
+        self.drop_indicator.set_visible(true);
+    }
+
+    pub fn hide_drop_indicator(&self) {
+        self.drop_indicator.set_visible(false);
+    }
+
+    pub fn is_drop_indicator_visible(&self) -> bool {
+        self.drop_indicator.get_visible()
+    }
+
+    pub fn clear_callbacks(&self) {
+        self.close_callbacks.borrow_mut().clear();
+        self.split_callbacks.borrow_mut().clear();
+        self.focus_callbacks.borrow_mut().clear();
+        self.commit_callbacks.borrow_mut().clear();
+        self.title_callbacks.borrow_mut().clear();
+        self.sync_toggled_callbacks.borrow_mut().clear();
+        self.bell_callbacks.borrow_mut().clear();
+        self.child_exit_callbacks.borrow_mut().clear();
+        self.dock_callback.borrow_mut().take();
     }
 }
 
@@ -528,6 +621,42 @@ mod tests {
 
             pane.set_header_visible(true);
             assert!(pane.is_header_visible());
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_drop_indicator_visibility() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(1), None);
+            assert!(!pane.is_drop_indicator_visible());
+
+            pane.show_drop_indicator(DockPosition::Top);
+            assert!(pane.is_drop_indicator_visible());
+
+            pane.hide_drop_indicator();
+            assert!(!pane.is_drop_indicator_visible());
+
+            pane.show_drop_indicator(DockPosition::Center);
+            assert!(pane.is_drop_indicator_visible());
+
+            pane.hide_drop_indicator();
+            assert!(!pane.is_drop_indicator_visible());
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_clear_callbacks() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(1), None);
+            let called = Rc::new(Cell::new(false));
+            let called_c = Rc::clone(&called);
+            pane.connect_close(move |_| {
+                called_c.set(true);
+            });
+
+            pane.clear_callbacks();
+            pane.close_button().emit_clicked();
+            assert!(!called.get());
         });
     }
 }
