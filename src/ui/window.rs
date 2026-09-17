@@ -19,6 +19,7 @@ type SessionMap = Rc<RefCell<HashMap<adw::TabPage, Rc<RefCell<SessionView>>>>>;
 thread_local! {
     static WIDGET_TO_SESSION: RefCell<HashMap<gtk::Widget, Rc<RefCell<SessionView>>>> = RefCell::new(HashMap::new());
     static WINDOW_HEADER_BARS: RefCell<Vec<glib::WeakRef<adw::HeaderBar>>> = const { RefCell::new(Vec::new()) };
+    static WINDOW_TAB_BARS: RefCell<Vec<glib::WeakRef<adw::TabBar>>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn register_session_widget(widget: &gtk::Widget, session: Rc<RefCell<SessionView>>) {
@@ -42,6 +43,19 @@ pub fn apply_window_style_to_all_windows(style: WindowStyle) {
         bars.borrow_mut().retain(|bar_weak| {
             if let Some(bar) = bar_weak.upgrade() {
                 bar.set_visible(style != WindowStyle::HideToolbar);
+                true
+            } else {
+                false
+            }
+        });
+    });
+}
+
+pub fn apply_show_tab_bar_to_all_windows(show: bool) {
+    WINDOW_TAB_BARS.with(|bars| {
+        bars.borrow_mut().retain(|bar_weak| {
+            if let Some(bar) = bar_weak.upgrade() {
+                bar.set_visible(show);
                 true
             } else {
                 false
@@ -107,6 +121,7 @@ pub fn setup_accels(app: &adw::Application) {
     app.set_accels_for_action("win.focus-down", &["<Alt>Down"]);
     app.set_accels_for_action("win.focus-left", &["<Alt>Left"]);
     app.set_accels_for_action("win.focus-right", &["<Alt>Right"]);
+    app.set_accels_for_action("win.toggle-tab-bar", &["F12", "<Primary><Shift>F12"]);
 
     for i in 1..=9 {
         let action_name = format!("win.switch-tab-{}", i);
@@ -171,6 +186,8 @@ impl TilixWindow {
         let tab_bar = adw::TabBar::new();
         tab_bar.set_view(Some(&tab_view));
         tab_bar.set_autohide(false);
+        tab_bar.set_visible(cfg.show_tab_bar);
+        WINDOW_TAB_BARS.with(|bars| bars.borrow_mut().push(tab_bar.downgrade()));
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header_bar);
@@ -690,6 +707,18 @@ impl TilixWindow {
             });
             self.window.add_action(&action);
         }
+
+        // Toggle Tab Bar
+        {
+            let action = gio::SimpleAction::new("toggle-tab-bar", None);
+            action.connect_activate(move |_, _| {
+                let mut cfg = crate::model::AppConfig::load();
+                cfg.show_tab_bar = !cfg.show_tab_bar;
+                let _ = cfg.save();
+                apply_show_tab_bar_to_all_windows(cfg.show_tab_bar);
+            });
+            self.window.add_action(&action);
+        }
     }
 
     pub fn window(&self) -> &adw::ApplicationWindow {
@@ -875,6 +904,54 @@ mod tests {
 
             unregister_session_widget(&widget);
             session.borrow().close();
+        });
+    }
+
+    #[test]
+    fn test_show_tab_bar_toggle() {
+        run_gtk_test(|| {
+            let mut init_cfg = crate::model::AppConfig::load();
+            init_cfg.show_tab_bar = true;
+            let _ = init_cfg.save();
+
+            let app = adw::Application::builder()
+                .application_id("com.github.tilix_rust.test_show_tab_bar")
+                .flags(gio::ApplicationFlags::NON_UNIQUE)
+                .build();
+            let tilix_win = TilixWindow::new_empty(&app);
+
+            let tab_bar = WINDOW_TAB_BARS
+                .with(|bars| bars.borrow().last().and_then(|w| w.upgrade()))
+                .expect("Tab bar must be registered");
+
+            // Initial state (default show_tab_bar is true)
+            assert!(tab_bar.get_visible());
+
+            // Broadcast hide
+            apply_show_tab_bar_to_all_windows(false);
+            assert!(!tab_bar.get_visible());
+
+            // Broadcast show
+            apply_show_tab_bar_to_all_windows(true);
+            assert!(tab_bar.get_visible());
+
+            // Test toggle-tab-bar action
+            let action = tilix_win
+                .window()
+                .lookup_action("toggle-tab-bar")
+                .expect("toggle-tab-bar action must exist");
+            action.activate(None);
+
+            let cfg = crate::model::AppConfig::load();
+            assert_eq!(tab_bar.get_visible(), cfg.show_tab_bar);
+            assert!(!tab_bar.get_visible());
+
+            // Reset back to default true
+            let mut reset_cfg = crate::model::AppConfig::load();
+            reset_cfg.show_tab_bar = true;
+            let _ = reset_cfg.save();
+
+            drop(tilix_win);
         });
     }
 }

@@ -243,7 +243,7 @@ When `LayoutTree` changes (split, close, rebalance, swap):
 ## 14. Reactive Preferences & Desktop Notifications
 
 - `AdwPreferencesWindow` provides interactive appearance, window, terminal title, behavior, and notification controls.
-- Dedicated "Window" group on the "Appearance" page offers "Window Style" (`adw::ComboRow`) and "Use a wide handle for splitters" (`adw::SwitchRow`).
+- Dedicated "Window" group on the "Appearance" page offers "Window Style" (`adw::ComboRow`), "Use a wide handle for splitters" (`adw::SwitchRow`), and "Show Tab Bar" (`adw::SwitchRow`).
 - Dedicated "Terminal Title" group on the "Appearance" page offers "Title Style" (`adw::ComboRow`: "Normal", "None") and "Show title when single terminal" (`adw::SwitchRow`).
 - `AppConfig` persisted to `~/.config/tilix/config.json` with `#[serde(default)]`, ensuring backwards and forwards schema compatibility across releases.
 - `NotificationService` dispatches desktop notifications for bell events and process completions with dynamic title lookup.
@@ -329,5 +329,23 @@ Phase 6 implements granular visibility controls for terminal pane header bars an
   - "Title Style" `adw::ComboRow` mapped to `Normal` (index 0) and `None` (index 1).
   - "Show title when single terminal" `adw::SwitchRow` bound to `pane_title_show_when_single`.
   - Changes instantly synchronize to disk (`config.json`) and broadcast to all live sessions.
+
+---
+
+## 18. TabBar Visibility & Shortcut Toggling Architecture
+
+- **Persistent vs. Hidden TabBar Configuration:**
+  - `show_tab_bar: bool` on `AppConfig` (defaults to `true`).
+  - `tab_bar.set_autohide(false)` is maintained by default to prevent vertical viewport size shifts and bash prompt jumps when creating/closing tabs.
+  - `tab_bar.set_visible(cfg.show_tab_bar)` reflects user configuration.
+- **Reactive Projection & Window Registry:**
+  - Thread-local `WINDOW_TAB_BARS` maintains `glib::WeakRef<adw::TabBar>` across all open windows.
+  - `apply_show_tab_bar_to_all_windows(show: bool)` broadcasts visibility updates across all live application windows instantly.
+- **Keyboard Shortcut & Action:**
+  - Window action `win.toggle-tab-bar` toggles `cfg.show_tab_bar`, saves the preference to `config.json`, and broadcasts the change.
+  - Default keybindings registered in `setup_accels`: `F12` (classic Tilix session/tab toggle key) and `<Primary><Shift>F12` (non-conflicting modifier shortcut).
+- **Roadmap / Future Milestones:**
+  - Custom Keybinding Manager: Support user-configurable keybindings through a dedicated Shortcuts tab in Preferences.
+
 
 

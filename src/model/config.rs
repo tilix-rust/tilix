@@ -31,6 +31,7 @@ pub struct AppConfig {
     pub use_wide_handle: bool,
     pub pane_title_style: PaneTitleStyle,
     pub pane_title_show_when_single: bool,
+    pub show_tab_bar: bool,
 }
 
 impl Default for AppConfig {
@@ -46,6 +47,7 @@ impl Default for AppConfig {
             use_wide_handle: false,
             pane_title_style: PaneTitleStyle::Normal,
             pane_title_show_when_single: true,
+            show_tab_bar: true,
         }
     }
 }
@@ -267,5 +269,20 @@ mod tests {
         let empty_json = "{}";
         let deserialized = AppConfig::from_json(empty_json).expect("deserialize empty json should succeed");
         assert_eq!(deserialized, AppConfig::default());
+        assert!(deserialized.show_tab_bar);
+    }
+
+    #[test]
+    fn test_app_config_roundtrip_with_show_tab_bar() {
+        let config = AppConfig {
+            show_tab_bar: false,
+            ..Default::default()
+        };
+        let json = config.to_json().expect("to_json should succeed");
+        assert!(json.contains("\"show_tab_bar\": false"));
+
+        let deserialized = AppConfig::from_json(&json).expect("from_json should succeed");
+        assert_eq!(config, deserialized);
+        assert!(!deserialized.show_tab_bar);
     }
 }

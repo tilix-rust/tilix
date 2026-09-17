@@ -118,6 +118,12 @@ impl TilixPreferencesWindow {
         wide_handle_row.set_active(current_config.borrow().use_wide_handle);
         window_group.add(&wide_handle_row);
 
+        let show_tab_bar_row = adw::SwitchRow::new();
+        show_tab_bar_row.set_title("Show Tab Bar");
+        show_tab_bar_row.set_subtitle("Show or hide the tab bar (toggle with F12 or Ctrl+Shift+F12)");
+        show_tab_bar_row.set_active(current_config.borrow().show_tab_bar);
+        window_group.add(&show_tab_bar_row);
+
         page.add(&window_group);
 
         // Terminal Title Group
@@ -210,6 +216,7 @@ impl TilixPreferencesWindow {
             let n_exit = notif_exit_row.clone();
             let w_style = window_style_row.clone();
             let w_handle = wide_handle_row.clone();
+            let t_bar = show_tab_bar_row.clone();
             let t_style = title_style_row.clone();
             let t_single = title_show_single_row.clone();
 
@@ -245,6 +252,7 @@ impl TilixPreferencesWindow {
                     _ => WindowStyle::Normal,
                 };
                 let use_wide_handle = w_handle.is_active();
+                let show_tab_bar = t_bar.is_active();
 
                 let pane_title_style = match t_style.selected() {
                     1 => PaneTitleStyle::None,
@@ -267,10 +275,12 @@ impl TilixPreferencesWindow {
                 cfg.use_wide_handle = use_wide_handle;
                 cfg.pane_title_style = pane_title_style;
                 cfg.pane_title_show_when_single = pane_title_show_when_single;
+                cfg.show_tab_bar = show_tab_bar;
 
                 let _ = cfg.save();
                 crate::ui::window::apply_window_style_to_all_windows(cfg.window_style);
                 crate::ui::window::apply_wide_handle_to_all_sessions(cfg.use_wide_handle);
+                crate::ui::window::apply_show_tab_bar_to_all_windows(cfg.show_tab_bar);
                 crate::ui::window::apply_pane_title_settings_to_all_sessions(
                     cfg.pane_title_style,
                     cfg.pane_title_show_when_single,
@@ -322,6 +332,10 @@ impl TilixPreferencesWindow {
         {
             let s = Rc::clone(&sync_and_save);
             wide_handle_row.connect_active_notify(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            show_tab_bar_row.connect_active_notify(move |_| s());
         }
         {
             let s = Rc::clone(&sync_and_save);
