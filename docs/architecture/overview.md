@@ -1,7 +1,7 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.8.0 (Phase 8 Final Architecture)  
+**Version:** 0.9.0 (Phase 9 Final Architecture)  
 **Date:** 2026-09-17  
 
 
@@ -507,3 +507,67 @@ Phase 8 elevates Tilix's tiling ergonomics to parity with modern tiling IDEs and
   - Instantiates a new empty window via `TilixWindow::new_empty(&app)`.
   - Mounts the existing pane via `create_tab_with_existing_pane(pane)` without restarting the shell.
   - Presents the newly detached window to the user.
+
+---
+
+## 21. Profile Customization Subsystem (Phase 9 Architecture)
+
+### 21.1 Extended Profile Schema & Preference Enums (`src/model/profile.rs`)
+- **Full Upstream Parity:** Models all 7 tabs from upstream `com.gexperts.Tilix.Profile` schema:
+  - **General:** `terminal_title`, dimensions (`columns`, `rows`), `cell_width_scale` and `cell_height_scale` (clamped 1.0..2.0), `draw_margin`, `text_blink_mode`, `allow_bold`, `rewrap_on_resize`, `use_system_font`, `font`, `select_by_word_chars`, `cursor_shape`, `cursor_blink`, `terminal_bell`.
+  - **Command:** `login_shell`, `use_custom_command`, `custom_command`, `exit_action`.
+  - **Color:** `color_scheme`, `use_theme_colors`, `background_transparency_percent`, `dim_transparency_percent`, bold color overrides, `bold_is_bright`, cursor color overrides, highlight color overrides.
+  - **Scrolling:** `show_scrollbar`, `scroll_on_output`, `scroll_on_keystroke`, `scrollback_unlimited`, `scrollback_lines`.
+  - **Compatibility:** `backspace_binding`, `delete_binding`, `encoding`, `cjk_utf8_ambiguous_width`.
+  - **Badge:** `badge_text`, `badge_position`, badge color overrides, badge font overrides.
+  - **Advanced:** `automatic_switch` rules, `custom_hyperlinks`, `triggers`, silence notification configuration.
+- **Preference Enums & Conversions:**
+  - `EraseBindingPreference`: `Auto`, `AsciiDelete`, `AsciiBackspace`, `DeleteSequence`, `Tty` with zero-cost conversion to `vte4::EraseBinding`.
+  - `TextBlinkModePreference`: `Never`, `Focused`, `Unfocused`, `Always` with conversion to `vte4::TextBlinkMode`.
+  - `TerminalBellPreference`: `None`, `Sound`, `Icon`, `IconSound`.
+  - `ExitActionPreference`: `Close`, `Restart`, `Hold`.
+  - `CjkWidthPreference`: `Narrow` (1 cell), `Wide` (2 cells).
+  - `BadgePosition`: `Northwest`, `Northeast`, `Southwest`, `Southeast`.
+
+### 21.2 Multi-Profile CRUD & Backward Compatibility (`src/model/config.rs`)
+- **Collection Management:**
+  - `profiles: Vec<Profile>`: Stores all user-defined profiles.
+  - `default_profile_id: String`: Designates the default profile.
+  - `default_profile: Profile`: Retained and synchronized with `default_profile_id` for 100% backward compatibility with legacy serde and Phase 1-8 tests.
+- **CRUD Operations:**
+  - `get_profile(id)` & `get_profile_mut(id)`: Lookup by ID.
+  - `get_default_profile()`: Returns the current active default.
+  - `add_profile(profile)`: Adds a new profile with collision detection and automatic ID generation.
+  - `duplicate_profile(id)`: Clones an existing profile, generating a unique ID and `(Copy)` naming suffix.
+  - `delete_profile(id)`: Removes profile with a guard enforcing `CannotDeleteLastProfile`. If deleting the default profile, automatically promotes the first remaining profile as default.
+  - `set_default_profile(id)`: Switches active default.
+  - `update_profile(profile)`: In-place update with automatic synchronization of `default_profile`.
+- **Legacy Normalization:**
+  - `AppConfig::from_json` automatically populates `profiles` and `default_profile_id` from legacy JSON payloads lacking multi-profile fields.
+
+### 21.3 Token Expansion & Automatic Switching Engine (`src/model/profile.rs`)
+- **Pure Domain Token Engine:**
+  - `expand_tokens(format_str, ctx)` supports `${id}`, `${title}`, `${profile}`, `${directory}`, `${appName}` with zero GTK dependencies.
+  - `expand_title_format` and `expand_badge_format` provide dedicated interfaces for header titles and badge overlays.
+- **Automatic Profile Switching:**
+  - `ProfileSwitchRule`: Encapsulates `hostname`, `directory`, and target `profile_id`.
+  - `ProfileSwitchRule::matches`: Evaluates hostname (exact or `*` wildcard, case-insensitive) and directory (exact match, prefix match, or `*` wildcard).
+
+### 21.4 PTY Shell Spawning & Login Shells (`src/pty/shell.rs`)
+- **Login Shell Prefixing:**
+  - `format_shell_argv0(shell_path, login_shell)`: Converts `/bin/bash` with `login_shell: true` into `"-bash"` so the shell invokes login profiles (`/etc/profile`, `~/.bash_profile`).
+- **Custom Command Execution:**
+  - `build_spawn_args(profile, detected_shell)`: If `use_custom_command` is enabled with a non-empty command, returns `("/bin/sh", ["/bin/sh", "-c", command])`. Otherwise falls back to detected shell with formatted argv0.
+
+### 21.5 Dynamic TerminalPane Profile Integration (`src/ui/terminal_pane.rs`, `src/ui/window.rs`)
+- **Scrollbar Widget:** External `gtk::Scrollbar` bound to `terminal.vadjustment()` inside a horizontal layout box; toggles visibility dynamically according to `profile.show_scrollbar`.
+- **Badge Overlay:** `gtk::Label` with `.terminal-badge` mounted non-targetable inside `self.overlay`, rendered using token-expanded text and aligned to `BadgePosition`.
+- **Margin Line:** Non-targetable vertical guide overlay with `.terminal-margin-line` visible when `draw_margin > 0`.
+- **Unfocused Dimming:** `set_active(false)` applies `1.0 - (dim_transparency_percent / 100.0)` opacity to `vte::Terminal`.
+- **Exit Action Handling:** `connect_child_exited` handles `Close` (destroys pane), `Restart` (re-spawns shell in place), and `Hold` (preserves terminal buffer and annotates title with `[Process exited: code]`).
+- **Reactive Profile Application:** `apply_profile` reconfigures live terminals dynamically without restarting running processes.
+
+### 21.6 Libadwaita Profiles Preferences Editor (`src/ui/preferences.rs`)
+- **Profile Management Header:** Combobox selecting from `config.profiles`, with New, Duplicate, Delete (guarded), and Set Default actions.
+- **7 Organized Tabs:** General, Command, Color (with transparency and palette overrides), Scrolling, Compatibility, Badge, and Advanced automation.
+- **Instant Reactive Persistence:** Every input modification saves immediately to configuration and pushes updates to all running terminal sessions via `apply_profile_to_all_sessions`.

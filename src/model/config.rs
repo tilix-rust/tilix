@@ -19,10 +19,22 @@ pub enum PaneTitleStyle {
     None,
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ProfileError {
+    #[error("Profile not found: {0}")]
+    ProfileNotFound(String),
+    #[error("Cannot delete the last remaining profile")]
+    CannotDeleteLastProfile,
+    #[error("Duplicate profile ID: {0}")]
+    DuplicateProfileId(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub default_profile: Profile,
+    pub profiles: Vec<Profile>,
+    pub default_profile_id: String,
     pub quake_height_percent: u32,
     pub quake_hide_on_unfocus: bool,
     pub notifications_enabled: bool,
@@ -38,8 +50,13 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
+        let default_profile = Profile::default();
+        let default_profile_id = default_profile.id.clone();
+        let profiles = vec![default_profile.clone()];
         Self {
-            default_profile: Profile::default(),
+            default_profile,
+            profiles,
+            default_profile_id,
             quake_height_percent: 40,
             quake_hide_on_unfocus: false,
             notifications_enabled: true,
@@ -70,7 +87,7 @@ impl AppConfig {
 
     pub fn load_from_path(path: &std::path::Path) -> Result<Self, std::io::Error> {
         let content = std::fs::read_to_string(path)?;
-        serde_json::from_str(&content)
+        Self::from_json(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
@@ -85,11 +102,113 @@ impl AppConfig {
     }
 
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+        let val: serde_json::Value = serde_json::from_str(json)?;
+        let mut config: Self = serde_json::from_value(val.clone())?;
+
+        let has_profiles = val
+            .get("profiles")
+            .is_some_and(|p| p.as_array().is_some_and(|a| !a.is_empty()));
+        let has_default_profile = val.get("default_profile").is_some();
+
+        if !has_profiles && has_default_profile {
+            config.profiles = vec![config.default_profile.clone()];
+            config.default_profile_id = config.default_profile.id.clone();
+        } else {
+            if config.profiles.is_empty() {
+                config.profiles = vec![config.default_profile.clone()];
+            }
+            if config.default_profile_id.is_empty() {
+                config.default_profile_id = config.profiles[0].id.clone();
+            }
+            if !has_default_profile {
+                if let Some(def) = config.profiles.iter().find(|p| p.id == config.default_profile_id) {
+                    config.default_profile = def.clone();
+                } else if !config.profiles.is_empty() {
+                    config.default_profile_id = config.profiles[0].id.clone();
+                    config.default_profile = config.profiles[0].clone();
+                }
+            }
+        }
+        Ok(config)
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
+    }
+
+    pub fn get_profile(&self, id: &str) -> Option<&Profile> {
+        self.profiles.iter().find(|p| p.id == id)
+    }
+
+    pub fn get_profile_mut(&mut self, id: &str) -> Option<&mut Profile> {
+        self.profiles.iter_mut().find(|p| p.id == id)
+    }
+
+    pub fn get_default_profile(&self) -> &Profile {
+        self.get_profile(&self.default_profile_id)
+            .unwrap_or(&self.default_profile)
+    }
+
+    pub fn add_profile(&mut self, mut profile: Profile) -> Result<String, ProfileError> {
+        if profile.id.is_empty() {
+            profile.id = format!("profile-{}", glib::uuid_string_random());
+        } else if self.profiles.iter().any(|p| p.id == profile.id) {
+            return Err(ProfileError::DuplicateProfileId(profile.id));
+        }
+        let id = profile.id.clone();
+        self.profiles.push(profile);
+        Ok(id)
+    }
+
+    pub fn duplicate_profile(&mut self, source_id: &str) -> Result<Profile, ProfileError> {
+        let source = self
+            .get_profile(source_id)
+            .ok_or_else(|| ProfileError::ProfileNotFound(source_id.to_string()))?;
+        let mut clone = source.clone();
+        clone.id = format!("profile-{}", glib::uuid_string_random());
+        clone.name = format!("{} (Copy)", clone.name);
+        self.profiles.push(clone.clone());
+        Ok(clone)
+    }
+
+    pub fn delete_profile(&mut self, id: &str) -> Result<(), ProfileError> {
+        if self.profiles.len() <= 1 {
+            return Err(ProfileError::CannotDeleteLastProfile);
+        }
+        let pos = self
+            .profiles
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| ProfileError::ProfileNotFound(id.to_string()))?;
+        self.profiles.remove(pos);
+        if self.default_profile_id == id {
+            self.default_profile_id = self.profiles[0].id.clone();
+            self.default_profile = self.profiles[0].clone();
+        }
+        Ok(())
+    }
+
+    pub fn set_default_profile(&mut self, id: &str) -> Result<(), ProfileError> {
+        let profile = self
+            .get_profile(id)
+            .ok_or_else(|| ProfileError::ProfileNotFound(id.to_string()))?
+            .clone();
+        self.default_profile_id = id.to_string();
+        self.default_profile = profile;
+        Ok(())
+    }
+
+    pub fn update_profile(&mut self, profile: Profile) -> Result<(), ProfileError> {
+        let pos = self
+            .profiles
+            .iter()
+            .position(|p| p.id == profile.id)
+            .ok_or_else(|| ProfileError::ProfileNotFound(profile.id.clone()))?;
+        if profile.id == self.default_profile_id {
+            self.default_profile = profile.clone();
+        }
+        self.profiles[pos] = profile;
+        Ok(())
     }
 }
 
@@ -345,6 +464,151 @@ mod tests {
             deserialized.keybindings.get_effective_accel("win.toggle-sync-input"),
             Some("".to_string())
         );
+    }
+
+    #[test]
+    fn test_app_config_profiles_defaults() {
+        let config = AppConfig::default();
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.default_profile_id, "default");
+        assert_eq!(config.default_profile.id, "default");
+        assert_eq!(config.get_default_profile().id, "default");
+    }
+
+    #[test]
+    fn test_app_config_add_profile() {
+        let mut config = AppConfig::default();
+        let new_prof = Profile {
+            id: "my-profile".into(),
+            name: "My Profile".into(),
+            ..Default::default()
+        };
+
+        let id = config.add_profile(new_prof).expect("add profile should succeed");
+        assert_eq!(id, "my-profile");
+        assert_eq!(config.profiles.len(), 2);
+        assert_eq!(config.get_profile("my-profile").unwrap().name, "My Profile");
+
+        // Duplicate ID should error
+        let dup = Profile {
+            id: "my-profile".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.add_profile(dup),
+            Err(ProfileError::DuplicateProfileId("my-profile".into()))
+        );
+
+        // Empty ID auto-generates unique ID
+        let auto_id = Profile {
+            id: "".into(),
+            ..Default::default()
+        };
+        let gen_id = config.add_profile(auto_id).expect("empty id should auto-generate");
+        assert!(!gen_id.is_empty());
+        assert!(gen_id.starts_with("profile-"));
+        assert_eq!(config.profiles.len(), 3);
+    }
+
+    #[test]
+    fn test_app_config_duplicate_profile() {
+        let mut config = AppConfig::default();
+        let cloned = config
+            .duplicate_profile("default")
+            .expect("duplicate should succeed");
+
+        assert_eq!(config.profiles.len(), 2);
+        assert_eq!(cloned.name, "Default (Copy)");
+        assert_ne!(cloned.id, "default");
+        assert!(config.get_profile(&cloned.id).is_some());
+
+        // Duplicate non-existent profile should error
+        assert_eq!(
+            config.duplicate_profile("non-existent"),
+            Err(ProfileError::ProfileNotFound("non-existent".into()))
+        );
+    }
+
+    #[test]
+    fn test_app_config_delete_profile() {
+        let mut config = AppConfig::default();
+        let prof2 = Profile {
+            id: "p2".into(),
+            ..Default::default()
+        };
+        config.add_profile(prof2).unwrap();
+
+        assert_eq!(config.profiles.len(), 2);
+        config.delete_profile("p2").expect("delete should succeed");
+        assert_eq!(config.profiles.len(), 1);
+        assert!(config.get_profile("p2").is_none());
+
+        assert_eq!(
+            config.delete_profile("p2"),
+            Err(ProfileError::CannotDeleteLastProfile)
+        );
+    }
+
+    #[test]
+    fn test_app_config_delete_default_profile_reassigns_default() {
+        let mut config = AppConfig::default();
+        let prof2 = Profile {
+            id: "p2".into(),
+            name: "Profile Two".into(),
+            ..Default::default()
+        };
+        config.add_profile(prof2).unwrap();
+
+        assert_eq!(config.default_profile_id, "default");
+        config.delete_profile("default").expect("deleting default should succeed if other profiles exist");
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.default_profile_id, "p2");
+        assert_eq!(config.default_profile.id, "p2");
+        assert_eq!(config.default_profile.name, "Profile Two");
+    }
+
+    #[test]
+    fn test_app_config_cannot_delete_last_profile() {
+        let mut config = AppConfig::default();
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(
+            config.delete_profile("default"),
+            Err(ProfileError::CannotDeleteLastProfile)
+        );
+    }
+
+    #[test]
+    fn test_app_config_set_default_profile() {
+        let mut config = AppConfig::default();
+        let prof2 = Profile {
+            id: "work".into(),
+            name: "Work".into(),
+            ..Default::default()
+        };
+        config.add_profile(prof2).unwrap();
+
+        config.set_default_profile("work").expect("set default should succeed");
+        assert_eq!(config.default_profile_id, "work");
+        assert_eq!(config.default_profile.name, "Work");
+
+        assert_eq!(
+            config.set_default_profile("missing"),
+            Err(ProfileError::ProfileNotFound("missing".into()))
+        );
+    }
+
+    #[test]
+    fn test_app_config_legacy_deserialization_populates_profiles() {
+        let legacy_json = r#"{
+            "notifications_enabled": false
+        }"#;
+
+        let config = AppConfig::from_json(legacy_json).expect("deserialize legacy json should succeed");
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.profiles[0].id, "default");
+        assert_eq!(config.default_profile_id, "default");
+        assert_eq!(config.default_profile.id, "default");
+        assert!(!config.notifications_enabled);
     }
 }
 

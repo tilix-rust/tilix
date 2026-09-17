@@ -59,6 +59,37 @@ pub fn default_env() -> Vec<String> {
     env
 }
 
+pub fn format_shell_argv0(shell_path: &str, login_shell: bool) -> String {
+    let bin_name = std::path::Path::new(shell_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(shell_path);
+    if login_shell {
+        format!("-{}", bin_name)
+    } else {
+        bin_name.to_string()
+    }
+}
+
+pub fn build_spawn_args(
+    profile: &crate::model::Profile,
+    detected_shell: &str,
+) -> (String, Vec<String>) {
+    if profile.use_custom_command && !profile.custom_command.trim().is_empty() {
+        (
+            "/bin/sh".to_string(),
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                profile.custom_command.clone(),
+            ],
+        )
+    } else {
+        let argv0 = format_shell_argv0(detected_shell, profile.login_shell);
+        (detected_shell.to_string(), vec![argv0])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +139,54 @@ mod tests {
         assert_eq!(parse_osc7_uri("ftp:///home/user"), None);
         assert_eq!(parse_osc7_uri("/home/user"), None);
         assert_eq!(parse_osc7_uri("file://"), None);
+    }
+
+    #[test]
+    fn test_format_shell_argv0_login_shell() {
+        assert_eq!(format_shell_argv0("/bin/bash", true), "-bash");
+        assert_eq!(format_shell_argv0("/usr/bin/zsh", true), "-zsh");
+        assert_eq!(format_shell_argv0("fish", true), "-fish");
+    }
+
+    #[test]
+    fn test_format_shell_argv0_non_login_shell() {
+        assert_eq!(format_shell_argv0("/bin/bash", false), "bash");
+        assert_eq!(format_shell_argv0("/usr/bin/zsh", false), "zsh");
+        assert_eq!(format_shell_argv0("fish", false), "fish");
+    }
+
+    #[test]
+    fn test_build_spawn_args_default_shell() {
+        let mut profile = crate::model::Profile {
+            login_shell: false,
+            ..Default::default()
+        };
+        let (cmd, args) = build_spawn_args(&profile, "/bin/bash");
+        assert_eq!(cmd, "/bin/bash");
+        assert_eq!(args, vec!["bash"]);
+
+        profile.login_shell = true;
+        let (cmd2, args2) = build_spawn_args(&profile, "/bin/bash");
+        assert_eq!(cmd2, "/bin/bash");
+        assert_eq!(args2, vec!["-bash"]);
+    }
+
+    #[test]
+    fn test_build_spawn_args_custom_command() {
+        let mut profile = crate::model::Profile {
+            use_custom_command: true,
+            custom_command: "htop -d 10".into(),
+            ..Default::default()
+        };
+
+        let (cmd, args) = build_spawn_args(&profile, "/bin/bash");
+        assert_eq!(cmd, "/bin/sh");
+        assert_eq!(args, vec!["/bin/sh", "-c", "htop -d 10"]);
+
+        // When custom_command is empty, fallback to detected shell
+        profile.custom_command = "   ".into();
+        let (cmd2, args2) = build_spawn_args(&profile, "/bin/bash");
+        assert_eq!(cmd2, "/bin/bash");
+        assert_eq!(args2, vec!["bash"]);
     }
 }

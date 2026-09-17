@@ -368,7 +368,7 @@ impl SessionView {
     ) -> TerminalPane {
         let pane = TerminalPane::new(id, initial_directory);
         let cfg = crate::model::AppConfig::load();
-        pane.apply_profile(&cfg.default_profile);
+        pane.apply_profile(cfg.get_default_profile());
 
         Self::wire_pane_callbacks(
             &pane,
@@ -672,6 +672,16 @@ impl SessionView {
         for pane in self.panes.borrow().values() {
             pane.apply_profile(profile);
         }
+    }
+
+    pub fn apply_profile_to_pane(&self, pane_id: PaneId, profile: &Profile) {
+        if let Some(pane) = self.panes.borrow().get(&pane_id) {
+            pane.apply_profile(profile);
+        }
+    }
+
+    pub fn get_pane_profile(&self, pane_id: PaneId) -> Option<Profile> {
+        self.panes.borrow().get(&pane_id).map(|p| p.current_profile())
     }
 
     pub fn apply_color_scheme(&self, scheme: &ColorScheme) {

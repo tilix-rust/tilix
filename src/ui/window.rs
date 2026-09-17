@@ -212,6 +212,18 @@ pub fn setup_css() {
             border-radius: 4px;
             transition: all 120ms ease-in-out;
         }
+        .terminal-badge {
+            font-size: 2.2em;
+            font-weight: bold;
+            opacity: 0.25;
+            margin: 16px;
+            color: @window_fg_color;
+        }
+        .terminal-margin-line {
+            background-color: alpha(@borders, 0.4);
+            min-width: 1px;
+            margin-left: 640px;
+        }
         ",
     );
     if let Some(display) = gtk::gdk::Display::default() {

@@ -8,8 +8,9 @@ use vte4 as vte;
 use vte::prelude::*;
 
 use crate::model::{
-    ColorScheme, CursorBlinkPreference, CursorShapePreference, DockPosition, PaneId, Profile,
-    SplitOrientation,
+    expand_badge_format, expand_title_format, ColorScheme, CursorBlinkPreference,
+    CursorShapePreference, DockPosition, ExitActionPreference, PaneId, Profile,
+    SplitOrientation, TitleTokenContext,
 };
 use crate::pty::{default_env, detect_shell, parse_osc7_uri};
 
@@ -24,9 +25,21 @@ type ChildExitCallback = Box<dyn Fn(PaneId, i32)>;
 type DockCallback = Box<dyn Fn(PaneId, PaneId, DockPosition)>;
 
 #[derive(Clone)]
+struct PaneWidgets {
+    terminal: vte::Terminal,
+    scrollbar: gtk::Scrollbar,
+    badge_label: gtk::Label,
+    margin_line: gtk::Box,
+    title_label: gtk::Label,
+}
+
+#[derive(Clone)]
 pub struct TerminalPane {
     overlay: gtk::Overlay,
     drop_indicator: gtk::Box,
+    badge_label: gtk::Label,
+    margin_line: gtk::Box,
+    scrollbar: gtk::Scrollbar,
     container: gtk::Box,
     header: gtk::Box,
     title_label: gtk::Label,
@@ -37,6 +50,7 @@ pub struct TerminalPane {
     terminal: vte::Terminal,
     pane_id: PaneId,
     current_directory: Rc<RefCell<Option<PathBuf>>>,
+    current_profile: Rc<RefCell<Profile>>,
     is_sync_enabled: Rc<Cell<bool>>,
     is_closing: Rc<Cell<bool>>,
     close_callbacks: Rc<RefCell<Vec<CloseCallback>>>,
@@ -95,13 +109,22 @@ impl TerminalPane {
         header.append(&split_v_btn);
         header.append(&close_btn);
 
-        // Terminal widget
+        // Terminal widget & scrollbar in horizontal box
         let terminal = vte::Terminal::new();
         terminal.set_vexpand(true);
         terminal.set_hexpand(true);
         terminal.set_can_focus(true);
         terminal.set_scroll_on_output(true);
         terminal.set_scroll_on_keystroke(true);
+
+        let scrollbar = gtk::Scrollbar::new(gtk::Orientation::Vertical, terminal.vadjustment().as_ref());
+        scrollbar.set_visible(true);
+
+        let term_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        term_box.set_vexpand(true);
+        term_box.set_hexpand(true);
+        term_box.append(&terminal);
+        term_box.append(&scrollbar);
 
         // Wire click gesture on header to focus terminal
         {
@@ -114,7 +137,7 @@ impl TerminalPane {
         }
 
         container.append(&header);
-        container.append(&terminal);
+        container.append(&term_box);
 
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&container));
@@ -125,7 +148,30 @@ impl TerminalPane {
         drop_indicator.set_visible(false);
         overlay.add_overlay(&drop_indicator);
 
+        let margin_line = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        margin_line.add_css_class("terminal-margin-line");
+        margin_line.set_halign(gtk::Align::Start);
+        margin_line.set_valign(gtk::Align::Fill);
+        margin_line.set_can_target(false);
+        margin_line.set_visible(false);
+        overlay.add_overlay(&margin_line);
+
+        let badge_label = gtk::Label::new(None);
+        badge_label.add_css_class("terminal-badge");
+        badge_label.set_can_target(false);
+        badge_label.set_visible(false);
+        overlay.add_overlay(&badge_label);
+
+        let pane_widgets = PaneWidgets {
+            terminal: terminal.clone(),
+            scrollbar: scrollbar.clone(),
+            badge_label: badge_label.clone(),
+            margin_line: margin_line.clone(),
+            title_label: title_label.clone(),
+        };
+
         let current_directory = Rc::new(RefCell::new(initial_directory.map(|p| p.to_path_buf())));
+        let current_profile = Rc::new(RefCell::new(Profile::default()));
         let is_sync_enabled = Rc::new(Cell::new(true));
         let is_closing = Rc::new(Cell::new(false));
         let close_callbacks: Rc<RefCell<Vec<CloseCallback>>> = Rc::new(RefCell::new(Vec::new()));
@@ -186,12 +232,16 @@ impl TerminalPane {
             });
         }
 
-        // Wire child exit
+        // Wire child exit with exit action handling
         {
             let close_cbs = Rc::clone(&close_callbacks);
             let exit_cbs = Rc::clone(&child_exit_callbacks);
             let is_closing = Rc::clone(&is_closing);
-            terminal.connect_child_exited(move |_term, status| {
+            let profile_rc = Rc::clone(&current_profile);
+            let title_lbl = title_label.clone();
+            let current_dir = Rc::clone(&current_directory);
+
+            terminal.connect_child_exited(move |term, status| {
                 if is_closing.get() {
                     return;
                 }
@@ -200,9 +250,23 @@ impl TerminalPane {
                         cb(pane_id, status);
                     }
                 }
-                if let Ok(list) = close_cbs.try_borrow() {
-                    for cb in list.iter() {
-                        cb(pane_id);
+
+                let action = profile_rc.borrow().exit_action;
+                match action {
+                    ExitActionPreference::Close => {
+                        if let Ok(list) = close_cbs.try_borrow() {
+                            for cb in list.iter() {
+                                cb(pane_id);
+                            }
+                        }
+                    }
+                    ExitActionPreference::Restart => {
+                        let dir = current_dir.borrow().clone();
+                        Self::spawn_shell_process(term, &profile_rc.borrow(), dir.as_deref());
+                    }
+                    ExitActionPreference::Hold => {
+                        let curr_title = title_lbl.text();
+                        title_lbl.set_text(&format!("{} [Process exited: {}]", curr_title, status));
                     }
                 }
             });
@@ -224,24 +288,35 @@ impl TerminalPane {
             });
         }
 
-        // Wire OSC 7 current directory uri changes
+        // Wire OSC 7 current directory uri changes and automatic switch evaluation
         {
             let cwd_clone = Rc::clone(&current_directory);
+            let prof_rc = Rc::clone(&current_profile);
+            let widgets = pane_widgets.clone();
             terminal.connect_current_directory_uri_changed(move |term| {
                 if let Some(uri) = term.current_directory_uri() {
                     if let Some(path) = parse_osc7_uri(&uri) {
                         if let Ok(mut cwd) = cwd_clone.try_borrow_mut() {
-                            *cwd = Some(path);
+                            *cwd = Some(path.clone());
                         }
+                        Self::check_auto_switch_static(
+                            &prof_rc,
+                            Some(&path),
+                            pane_id,
+                            &widgets,
+                        );
                     }
                 }
             });
         }
 
-        // Wire window title change
+        // Wire window title change and automatic switch evaluation
         {
             let label_clone = title_label.clone();
             let callbacks = Rc::clone(&title_callbacks);
+            let prof_rc = Rc::clone(&current_profile);
+            let cwd_clone = Rc::clone(&current_directory);
+            let widgets = pane_widgets.clone();
             terminal.connect_window_title_changed(move |term| {
                 if let Some(title) = term.window_title() {
                     label_clone.set_text(&title);
@@ -250,6 +325,13 @@ impl TerminalPane {
                             cb(pane_id, &title);
                         }
                     }
+                    let dir = cwd_clone.borrow().clone();
+                    Self::check_auto_switch_static(
+                        &prof_rc,
+                        dir.as_deref(),
+                        pane_id,
+                        &widgets,
+                    );
                 }
             });
         }
@@ -280,30 +362,15 @@ impl TerminalPane {
             });
         }
 
-        // Spawn shell asynchronously
-        let shell = detect_shell();
-        let env_vars = default_env();
-        let env_refs: Vec<&str> = env_vars.iter().map(|s| s.as_str()).collect();
-        let init_dir_str = initial_directory.and_then(|p| p.to_str());
-        terminal.spawn_async(
-            vte::PtyFlags::DEFAULT,
-            init_dir_str,
-            &[&shell],
-            &env_refs,
-            glib::SpawnFlags::DEFAULT,
-            || {},
-            -1,
-            gio::Cancellable::NONE,
-            |res| {
-                if let Err(e) = res {
-                    glib::g_warning!("Tilix", "Failed to spawn shell: {}", e);
-                }
-            },
-        );
+        // Spawn initial shell process asynchronously
+        Self::spawn_shell_process(&terminal, &current_profile.borrow(), initial_directory);
 
         Self {
             overlay,
             drop_indicator,
+            badge_label,
+            margin_line,
+            scrollbar,
             container,
             header,
             title_label,
@@ -314,6 +381,7 @@ impl TerminalPane {
             terminal,
             pane_id,
             current_directory,
+            current_profile,
             is_sync_enabled,
             is_closing,
             close_callbacks,
@@ -327,6 +395,61 @@ impl TerminalPane {
             dock_callback: Rc::new(RefCell::new(None)),
             drag_source_initialized: Rc::new(Cell::new(false)),
             drop_target_initialized: Rc::new(Cell::new(false)),
+        }
+    }
+
+    fn spawn_shell_process(terminal: &vte::Terminal, profile: &Profile, directory: Option<&Path>) {
+        let shell = detect_shell();
+        let env_vars = default_env();
+        let env_refs: Vec<&str> = env_vars.iter().map(|s| s.as_str()).collect();
+        let init_dir_str = directory.and_then(|p| p.to_str());
+        let (_cmd, argv) = crate::pty::shell::build_spawn_args(profile, &shell);
+        let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+
+        terminal.spawn_async(
+            vte::PtyFlags::DEFAULT,
+            init_dir_str,
+            &argv_refs,
+            &env_refs,
+            glib::SpawnFlags::DEFAULT,
+            || {},
+            -1,
+            gio::Cancellable::NONE,
+            |res| {
+                if let Err(e) = res {
+                    glib::g_warning!("Tilix", "Failed to spawn shell: {}", e);
+                }
+            },
+        );
+    }
+
+    fn check_auto_switch_static(
+        profile_rc: &Rc<RefCell<Profile>>,
+        directory: Option<&Path>,
+        pane_id: PaneId,
+        widgets: &PaneWidgets,
+    ) {
+        let curr_prof = profile_rc.borrow().clone();
+        if curr_prof.automatic_switch.is_empty() {
+            return;
+        }
+        let hostname = glib::host_name();
+        let empty_path = Path::new("");
+        let dir = directory.unwrap_or(empty_path);
+        for rule in &curr_prof.automatic_switch {
+            if rule.matches(&hostname, dir) && rule.profile_id != curr_prof.id {
+                let cfg = crate::model::AppConfig::load();
+                if let Some(target) = cfg.get_profile(&rule.profile_id) {
+                    *profile_rc.borrow_mut() = target.clone();
+                    Self::apply_profile_to_widgets(
+                        target,
+                        pane_id,
+                        directory,
+                        widgets,
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -344,6 +467,26 @@ impl TerminalPane {
 
     pub fn sync_button(&self) -> &gtk::ToggleButton {
         &self.sync_btn
+    }
+
+    pub fn scrollbar(&self) -> &gtk::Scrollbar {
+        &self.scrollbar
+    }
+
+    pub fn is_scrollbar_visible(&self) -> bool {
+        self.scrollbar.get_visible()
+    }
+
+    pub fn badge_label(&self) -> &gtk::Label {
+        &self.badge_label
+    }
+
+    pub fn margin_line(&self) -> &gtk::Box {
+        &self.margin_line
+    }
+
+    pub fn current_profile(&self) -> Profile {
+        self.current_profile.borrow().clone()
     }
 
     pub fn pane_id(&self) -> PaneId {
@@ -398,8 +541,15 @@ impl TerminalPane {
     pub fn set_active(&self, active: bool) {
         if active {
             self.container.add_css_class("active-pane");
+            self.terminal.set_opacity(1.0);
         } else {
             self.container.remove_css_class("active-pane");
+            let dim = self.current_profile.borrow().dim_transparency_percent;
+            if dim > 0 {
+                self.terminal.set_opacity(1.0 - (dim.min(100) as f64 / 100.0));
+            } else {
+                self.terminal.set_opacity(1.0);
+            }
         }
     }
 
@@ -469,40 +619,223 @@ impl TerminalPane {
         }
     }
 
-    pub fn apply_profile(&self, profile: &Profile) {
-        self.apply_color_scheme(&profile.color_scheme);
+    fn apply_profile_to_widgets(
+        profile: &Profile,
+        pane_id: PaneId,
+        directory: Option<&Path>,
+        widgets: &PaneWidgets,
+    ) {
+        widgets.scrollbar.set_visible(profile.show_scrollbar);
 
-        if let Some(ref font_name) = profile.font {
+        // Font
+        if profile.use_system_font {
+            let font_desc = gtk::pango::FontDescription::from_string("Monospace 11");
+            widgets.terminal.set_font(Some(&font_desc));
+        } else if let Some(ref font_name) = profile.font {
             let font_desc = gtk::pango::FontDescription::from_string(font_name);
-            self.terminal.set_font(Some(&font_desc));
+            widgets.terminal.set_font(Some(&font_desc));
         }
 
-        if let Some(lines) = profile.scrollback_lines {
-            self.terminal.set_scrollback_lines(lines);
+        // Cell scale
+        let w_scale = profile.cell_width_scale.clamp(1.0, 2.0);
+        let h_scale = profile.cell_height_scale.clamp(1.0, 2.0);
+        widgets.terminal.set_cell_width_scale(w_scale);
+        widgets.terminal.set_cell_height_scale(h_scale);
+
+        // Text blink
+        widgets.terminal.set_text_blink_mode(profile.text_blink_mode.into());
+        widgets.terminal.set_bold_is_bright(profile.bold_is_bright);
+
+        let to_gdk = |c: &crate::model::RgbColor| {
+            gtk::gdk::RGBA::builder()
+                .red(c.red as f32)
+                .green(c.green as f32)
+                .blue(c.blue as f32)
+                .alpha(c.alpha as f32)
+                .build()
+        };
+
+        // Bold color
+        if profile.bold_color_set {
+            if let Some(ref c) = profile.bold_color {
+                let rgba = to_gdk(c);
+                widgets.terminal.set_color_bold(Some(&rgba));
+            } else {
+                widgets.terminal.set_color_bold(None);
+            }
+        } else {
+            widgets.terminal.set_color_bold(None);
         }
 
+        // Cursor color
+        if profile.cursor_colors_set {
+            if let Some(ref c) = profile.cursor_background_color {
+                let rgba = to_gdk(c);
+                widgets.terminal.set_color_cursor(Some(&rgba));
+            } else {
+                widgets.terminal.set_color_cursor(None);
+            }
+            if let Some(ref c) = profile.cursor_foreground_color {
+                let rgba = to_gdk(c);
+                widgets.terminal.set_color_cursor_foreground(Some(&rgba));
+            } else {
+                widgets.terminal.set_color_cursor_foreground(None);
+            }
+        } else if let Some(ref c) = profile.color_scheme.cursor {
+            let cursor_rgba = to_gdk(c);
+            widgets.terminal.set_color_cursor(Some(&cursor_rgba));
+            if let Some(ref c_fg) = profile.color_scheme.cursor_foreground {
+                let fg_rgba = to_gdk(c_fg);
+                widgets.terminal.set_color_cursor_foreground(Some(&fg_rgba));
+            } else {
+                widgets.terminal.set_color_cursor_foreground(None);
+            }
+        } else {
+            widgets.terminal.set_color_cursor(None);
+            widgets.terminal.set_color_cursor_foreground(None);
+        }
+
+        // Highlight color
+        if profile.highlight_colors_set {
+            if let Some(ref c) = profile.highlight_background_color {
+                let rgba = to_gdk(c);
+                widgets.terminal.set_color_highlight(Some(&rgba));
+            } else {
+                widgets.terminal.set_color_highlight(None);
+            }
+            if let Some(ref c) = profile.highlight_foreground_color {
+                let rgba = to_gdk(c);
+                widgets.terminal.set_color_highlight_foreground(Some(&rgba));
+            } else {
+                widgets.terminal.set_color_highlight_foreground(None);
+            }
+        } else {
+            widgets.terminal.set_color_highlight(None);
+            widgets.terminal.set_color_highlight_foreground(None);
+        }
+
+        // Background transparency & colors
+        let fg = to_gdk(&profile.color_scheme.foreground);
+        let mut bg = to_gdk(&profile.color_scheme.background);
+        if profile.background_transparency_percent > 0 {
+            let alpha = (100 - profile.background_transparency_percent.min(100)) as f32 / 100.0;
+            bg = gtk::gdk::RGBA::builder()
+                .red(bg.red())
+                .green(bg.green())
+                .blue(bg.blue())
+                .alpha(alpha)
+                .build();
+        }
+        let palette_gdk: Vec<gtk::gdk::RGBA> = profile.color_scheme.palette.iter().map(to_gdk).collect();
+        let palette_refs: Vec<&gtk::gdk::RGBA> = palette_gdk.iter().collect();
+        widgets.terminal.set_colors(Some(&fg), Some(&bg), &palette_refs);
+
+        // Cursor shape & blink
         match profile.cursor_shape {
-            CursorShapePreference::Block => {
-                self.terminal.set_cursor_shape(vte::CursorShape::Block);
-            }
-            CursorShapePreference::IBeam => {
-                self.terminal.set_cursor_shape(vte::CursorShape::Ibeam);
-            }
-            CursorShapePreference::Underline => {
-                self.terminal.set_cursor_shape(vte::CursorShape::Underline);
-            }
+            CursorShapePreference::Block => widgets.terminal.set_cursor_shape(vte::CursorShape::Block),
+            CursorShapePreference::IBeam => widgets.terminal.set_cursor_shape(vte::CursorShape::Ibeam),
+            CursorShapePreference::Underline => widgets.terminal.set_cursor_shape(vte::CursorShape::Underline),
+        }
+        match profile.cursor_blink {
+            CursorBlinkPreference::System => widgets.terminal.set_cursor_blink_mode(vte::CursorBlinkMode::System),
+            CursorBlinkPreference::On => widgets.terminal.set_cursor_blink_mode(vte::CursorBlinkMode::On),
+            CursorBlinkPreference::Off => widgets.terminal.set_cursor_blink_mode(vte::CursorBlinkMode::Off),
         }
 
-        match profile.cursor_blink {
-            CursorBlinkPreference::System => {
-                self.terminal
-                    .set_cursor_blink_mode(vte::CursorBlinkMode::System);
+        // Scrollback
+        if profile.scrollback_unlimited {
+            widgets.terminal.set_scrollback_lines(-1);
+        } else if let Some(lines) = profile.scrollback_lines {
+            widgets.terminal.set_scrollback_lines(lines);
+        }
+        widgets.terminal.set_scroll_on_output(profile.scroll_on_output);
+        widgets.terminal.set_scroll_on_keystroke(profile.scroll_on_keystroke);
+
+        // Compatibility
+        widgets.terminal.set_backspace_binding(profile.backspace_binding.into());
+        widgets.terminal.set_delete_binding(profile.delete_binding.into());
+        widgets.terminal.set_cjk_ambiguous_width(profile.cjk_utf8_ambiguous_width.to_width());
+        widgets.terminal.set_word_char_exceptions(&profile.select_by_word_chars);
+
+        // Margin guide line
+        widgets.margin_line.set_visible(profile.draw_margin > 0);
+
+        // Token expansion context
+        let current_title = widgets.title_label.text().to_string();
+        let ctx = TitleTokenContext {
+            id: pane_id.0,
+            title: &current_title,
+            profile_name: &profile.name,
+            directory,
+            app_name: "Tilix",
+        };
+
+        // Title format
+        let expanded_title = expand_title_format(&profile.terminal_title, &ctx);
+        widgets.title_label.set_text(&expanded_title);
+
+        // Badge overlay
+        if profile.badge_text.trim().is_empty() {
+            widgets.badge_label.set_visible(false);
+        } else {
+            let expanded_badge = expand_badge_format(&profile.badge_text, &ctx);
+            widgets.badge_label.set_text(&expanded_badge);
+            match profile.badge_position {
+                crate::model::BadgePosition::Northwest => {
+                    widgets.badge_label.set_halign(gtk::Align::Start);
+                    widgets.badge_label.set_valign(gtk::Align::Start);
+                }
+                crate::model::BadgePosition::Northeast => {
+                    widgets.badge_label.set_halign(gtk::Align::End);
+                    widgets.badge_label.set_valign(gtk::Align::Start);
+                }
+                crate::model::BadgePosition::Southwest => {
+                    widgets.badge_label.set_halign(gtk::Align::Start);
+                    widgets.badge_label.set_valign(gtk::Align::End);
+                }
+                crate::model::BadgePosition::Southeast => {
+                    widgets.badge_label.set_halign(gtk::Align::End);
+                    widgets.badge_label.set_valign(gtk::Align::End);
+                }
             }
-            CursorBlinkPreference::On => {
-                self.terminal.set_cursor_blink_mode(vte::CursorBlinkMode::On);
-            }
-            CursorBlinkPreference::Off => {
-                self.terminal.set_cursor_blink_mode(vte::CursorBlinkMode::Off);
+            widgets.badge_label.set_visible(true);
+        }
+    }
+
+    pub fn apply_profile(&self, profile: &Profile) {
+        *self.current_profile.borrow_mut() = profile.clone();
+        let dir = self.current_directory();
+        let widgets = PaneWidgets {
+            terminal: self.terminal.clone(),
+            scrollbar: self.scrollbar.clone(),
+            badge_label: self.badge_label.clone(),
+            margin_line: self.margin_line.clone(),
+            title_label: self.title_label.clone(),
+        };
+        Self::apply_profile_to_widgets(
+            profile,
+            self.pane_id,
+            dir.as_deref(),
+            &widgets,
+        );
+    }
+
+    pub fn check_automatic_profile_switching(&self) {
+        let curr_prof = self.current_profile.borrow().clone();
+        if curr_prof.automatic_switch.is_empty() {
+            return;
+        }
+        let hostname = glib::host_name();
+        let dir = self.current_directory();
+        let empty_path = Path::new("");
+        let dir_ref = dir.as_deref().unwrap_or(empty_path);
+        for rule in &curr_prof.automatic_switch {
+            if rule.matches(&hostname, dir_ref) && rule.profile_id != curr_prof.id {
+                let cfg = crate::model::AppConfig::load();
+                if let Some(target) = cfg.get_profile(&rule.profile_id) {
+                    self.apply_profile(target);
+                    break;
+                }
             }
         }
     }
@@ -659,5 +992,96 @@ mod tests {
             assert!(!called.get());
         });
     }
-}
 
+    #[test]
+    fn test_terminal_pane_scrollbar_toggle() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(1), None);
+            let mut prof = Profile {
+                show_scrollbar: true,
+                ..Default::default()
+            };
+            pane.apply_profile(&prof);
+            assert!(pane.is_scrollbar_visible());
+
+            prof.show_scrollbar = false;
+            pane.apply_profile(&prof);
+            assert!(!pane.is_scrollbar_visible());
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_badge_overlay() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(1), None);
+            let badge = pane.badge_label();
+            assert!(!badge.can_target());
+            assert!(!badge.get_visible());
+
+            let prof = Profile {
+                badge_text: "DEV ${id}".into(),
+                badge_position: crate::model::BadgePosition::Southwest,
+                ..Default::default()
+            };
+            pane.apply_profile(&prof);
+
+            assert!(badge.get_visible());
+            assert_eq!(badge.text().as_str(), "DEV 1");
+            assert_eq!(badge.halign(), gtk::Align::Start);
+            assert_eq!(badge.valign(), gtk::Align::End);
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_apply_extended_profile() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(1), None);
+            let prof = Profile {
+                cell_width_scale: 1.3,
+                cell_height_scale: 1.2,
+                background_transparency_percent: 25,
+                dim_transparency_percent: 30,
+                draw_margin: 80,
+                terminal_title: "MyTitle [${id}]".into(),
+                ..Default::default()
+            };
+
+            pane.apply_profile(&prof);
+
+            assert_eq!(pane.title(), "MyTitle [1]");
+            assert!(pane.margin_line().get_visible());
+            assert_eq!(pane.current_profile().dim_transparency_percent, 30);
+
+            // Test dimming on inactive
+            pane.set_active(false);
+            assert!((pane.terminal().opacity() - 0.7).abs() < 0.01);
+            pane.set_active(true);
+            assert_eq!(pane.terminal().opacity(), 1.0);
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_exit_action_hold() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(1), None);
+            let prof = Profile {
+                exit_action: ExitActionPreference::Hold,
+                ..Default::default()
+            };
+            pane.apply_profile(&prof);
+
+            let close_called = Rc::new(Cell::new(false));
+            let close_called_c = Rc::clone(&close_called);
+            pane.connect_close(move |_| {
+                close_called_c.set(true);
+            });
+
+            // Simulate child exit with status 0
+            pane.terminal().emit_by_name::<()>("child-exited", &[&0i32]);
+
+            // Hold should NOT trigger close callbacks
+            assert!(!close_called.get());
+            assert!(pane.title().contains("[Process exited: 0]"));
+        });
+    }
+}
