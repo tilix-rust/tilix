@@ -188,23 +188,30 @@ pub fn setup_css() {
             opacity: 1.0;
         }
         paned > separator {
-            background-color: alpha(@borders, 0.75);
-            background-clip: content-box;
-            transition: background-color 150ms ease-in-out;
+            background-color: transparent;
+            background-image: none;
+            border: none;
+            transition: border-color 150ms ease-in-out;
         }
         paned.horizontal > separator:not(.wide) {
-            min-width: 1px;
+            min-width: 6px;
             margin: 0;
-            padding: 0 4px;
+            padding: 0;
+            border-left: 1px solid alpha(@borders, 0.75);
         }
         paned.vertical > separator:not(.wide) {
-            min-height: 1px;
+            min-height: 6px;
             margin: 0;
-            padding: 4px 0;
+            padding: 0;
+            border-top: 1px solid alpha(@borders, 0.75);
         }
-        paned > separator:hover,
-        paned > separator:active {
-            background-color: @accent_color;
+        paned.horizontal > separator:hover,
+        paned.horizontal > separator:active {
+            border-left-color: @accent_color;
+        }
+        paned.vertical > separator:hover,
+        paned.vertical > separator:active {
+            border-top-color: @accent_color;
         }
         .drop-indicator-overlay {
             background-color: alpha(@accent_color, 0.35);

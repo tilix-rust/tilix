@@ -752,6 +752,7 @@ impl SessionView {
         node: &LayoutNode,
         panes: &HashMap<PaneId, TerminalPane>,
         model: &Rc<RefCell<SessionModel>>,
+        container: &gtk::Box,
         wide_handle: bool,
     ) -> gtk::Widget {
         match node {
@@ -782,28 +783,66 @@ impl SessionView {
                 paned.set_resize_start_child(true);
                 paned.set_resize_end_child(true);
 
-                let first_widget = Self::build_node(first, panes, model, wide_handle);
-                let second_widget = Self::build_node(second, panes, model, wide_handle);
+                let first_widget = Self::build_node(first, panes, model, container, wide_handle);
+                let second_widget = Self::build_node(second, panes, model, container, wide_handle);
 
                 paned.set_start_child(Some(&first_widget));
                 paned.set_end_child(Some(&second_widget));
 
                 let r = *ratio;
-                paned.connect_realize(move |p| {
-                    let len = match p.orientation() {
-                        gtk::Orientation::Horizontal => p.width(),
-                        gtk::Orientation::Vertical => p.height(),
-                        _ => p.width(),
-                    };
-                    if len > 0 {
-                        p.set_position((len as f64 * r).round() as i32);
+                paned.connect_map(move |p| {
+                    let p_weak = p.downgrade();
+                    glib::idle_add_local_once(move || {
+                        if let Some(p) = p_weak.upgrade() {
+                            let len = match p.orientation() {
+                                gtk::Orientation::Horizontal => p.width(),
+                                gtk::Orientation::Vertical => p.height(),
+                                _ => p.width(),
+                            };
+                            if len > 0 {
+                                p.set_position((len as f64 * r).round() as i32);
+                            }
+                        }
+                    });
+                });
+
+                // Also run once via idle immediately in case widget is already mapped
+                let paned_init_weak = paned.downgrade();
+                glib::idle_add_local_once(move || {
+                    if let Some(p) = paned_init_weak.upgrade() {
+                        let len = match p.orientation() {
+                            gtk::Orientation::Horizontal => p.width(),
+                            gtk::Orientation::Vertical => p.height(),
+                            _ => p.width(),
+                        };
+                        if len > 0 {
+                            p.set_position((len as f64 * r).round() as i32);
+                        }
                     }
                 });
+
+                // Attach double-click gesture directly to paned and group with its drag gesture
+                let controllers = paned.observe_controllers();
+                let mut drag_opt = None;
+                for i in 0..controllers.n_items() {
+                    if let Some(item) = controllers.item(i) {
+                        if let Some(drag) = item.downcast_ref::<gtk::GestureDrag>() {
+                            drag_opt = Some(drag.clone());
+                        }
+                    }
+                }
 
                 let split_id = *id;
                 let split_orientation = *orientation;
                 let model_clone = Rc::clone(model);
+                let drag_for_notify = drag_opt.clone();
                 paned.connect_notify_local(Some("position"), move |p, _| {
+                    // Only update ratio from position if user is dragging
+                    if let Some(ref drag) = drag_for_notify {
+                        if !drag.is_active() {
+                            return;
+                        }
+                    }
                     let len = match p.orientation() {
                         gtk::Orientation::Horizontal => p.width(),
                         gtk::Orientation::Vertical => p.height(),
@@ -817,69 +856,63 @@ impl SessionView {
                     }
                 });
 
-                // Attach double-click gesture to equalize panes in this direction
-                let mut handle_opt = None;
-                let mut child = paned.first_child();
-                while let Some(c) = child {
-                    if c.css_name() == "separator" {
-                        handle_opt = Some(c);
-                        break;
-                    }
-                    child = c.next_sibling();
-                }
-
+                let container_weak = container.downgrade();
                 let paned_weak = paned.downgrade();
                 let model_for_click = Rc::clone(model);
                 let click = gtk::GestureClick::new();
                 click.set_button(gtk::gdk::BUTTON_PRIMARY);
                 click.set_propagation_phase(gtk::PropagationPhase::Capture);
-                let handle_found = handle_opt.is_some();
-                click.connect_pressed(move |gesture, n_press, x, y| {
-                    if n_press == 2 {
-                        let Some(p) = paned_weak.upgrade() else {
-                            return;
-                        };
-                        if !handle_found {
-                            let pos = p.position();
-                            let is_on_handle = match p.orientation() {
-                                gtk::Orientation::Horizontal => (x - pos as f64).abs() <= 8.0,
-                                gtk::Orientation::Vertical => (y - pos as f64).abs() <= 8.0,
-                                _ => false,
-                            };
-                            if !is_on_handle {
-                                return;
-                            }
-                        }
-                        gesture.set_state(gtk::EventSequenceState::Claimed);
-                        if let Ok(mut m) = model_for_click.try_borrow_mut() {
-                            m.layout.equalize_direction(split_orientation);
-                        }
+                paned.add_controller(click.clone());
+                if let Some(ref drag) = drag_opt {
+                    click.group_with(drag);
+                }
+
+                let do_equalize = Rc::new(move |gesture: &gtk::GestureClick, n_press: i32, x: f64, y: f64| {
+                    if n_press != 2 {
+                        return;
+                    }
+                    let Some(p) = paned_weak.upgrade() else {
+                        return;
+                    };
+                    let pos = p.position() as f64;
+                    let is_on_handle = (match p.orientation() {
+                        gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
+                        gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
+                        _ => false,
+                    }) || p.pick(x, y, gtk::PickFlags::DEFAULT).map(|w| w.css_name() == "separator").unwrap_or(false);
+
+                    if !is_on_handle {
+                        return;
+                    }
+
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    if let Ok(mut m) = model_for_click.try_borrow_mut() {
+                        m.layout.equalize_direction(split_orientation);
+                    }
+                    if let Some(container) = container_weak.upgrade() {
                         let model_b = model_for_click.borrow();
                         if let Some(root_node) = model_b.layout.root() {
-                            let mut top = p.clone().upcast::<gtk::Widget>();
-                            while let Some(parent) = top.parent() {
-                                if parent.is::<gtk::Box>() {
-                                    break;
-                                }
-                                top = parent;
+                            if let Some(root_widget) = container.first_child() {
+                                Self::apply_ratios_recursive(root_node, &root_widget);
+                                let root_clone = root_node.clone();
+                                let rw_weak = root_widget.downgrade();
+                                glib::idle_add_local_once(move || {
+                                    if let Some(rw) = rw_weak.upgrade() {
+                                        Self::apply_ratios_recursive(&root_clone, &rw);
+                                    }
+                                });
                             }
-                            Self::apply_ratios_recursive(root_node, &top);
-                            let root_clone = root_node.clone();
-                            let top_weak = top.downgrade();
-                            glib::idle_add_local_once(move || {
-                                if let Some(w) = top_weak.upgrade() {
-                                    Self::apply_ratios_recursive(&root_clone, &w);
-                                }
-                            });
                         }
                     }
                 });
 
-                if let Some(ref handle) = handle_opt {
-                    handle.add_controller(click);
-                } else {
-                    paned.add_controller(click);
-                }
+                let do_equalize_rel = Rc::clone(&do_equalize);
+                click.connect_pressed(move |g, n, x, y| {
+                    do_equalize(g, n, x, y);
+                });
+                click.connect_released(move |g, n, x, y| {
+                    do_equalize_rel(g, n, x, y);
+                });
 
                 paned.upcast()
             }
@@ -962,7 +995,7 @@ impl SessionView {
             return;
         };
 
-        let root_widget = Self::build_node(root_node, &panes_b, model, wide_handle);
+        let root_widget = Self::build_node(root_node, &panes_b, model, container, wide_handle);
         root_widget.set_vexpand(true);
         root_widget.set_hexpand(true);
         container.append(&root_widget);
@@ -1365,6 +1398,114 @@ mod tests {
                 child = c.next_sibling();
             }
             assert!(handle_found, "Separator handle must exist in GtkPaned");
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_paned_hit_test_symmetry() {
+        crate::ui::window::run_gtk_test(|| {
+            crate::ui::window::setup_css();
+            let window = gtk::Window::new();
+            window.set_default_size(400, 300);
+            let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+            let b1 = gtk::Button::new();
+            let b2 = gtk::Button::new();
+            paned.set_start_child(Some(&b1));
+            paned.set_end_child(Some(&b2));
+            paned.set_position(200);
+            window.set_child(Some(&paned));
+            window.present();
+
+            let ctx = glib::MainContext::default();
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
+
+            // Hit test: line is drawn at x = 200.
+            // Left of line: [194..199] (6px) picked as separator.
+            // Right of line: [201..206] (6px) picked as separator.
+            // Exactly 6px symmetric hit area on both sides.
+            for x in [194.0, 197.0, 199.0, 200.0, 201.0, 203.0, 206.0] {
+                let picked = paned.pick(x, 150.0, gtk::PickFlags::DEFAULT);
+                assert_eq!(
+                    picked.map(|w| w.css_name().to_string()),
+                    Some("separator".to_string()),
+                    "x={} should be picked as separator",
+                    x
+                );
+            }
+            // Outside the 6px margin
+            assert_eq!(
+                paned.pick(190.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
+                Some("button".to_string())
+            );
+            assert_eq!(
+                paned.pick(210.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
+                Some("button".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn test_double_click_separator_equalizes_panes() {
+        crate::ui::window::run_gtk_test(|| {
+            crate::ui::window::setup_css();
+            let mut model = SessionModel::new(PaneId(1));
+            model.split_pane(PaneId(1), SplitOrientation::Horizontal).unwrap();
+            let root = model.layout.root().unwrap().clone();
+            if let LayoutNode::Split { id, .. } = root {
+                model.layout.set_split_ratio(id, 0.2);
+            }
+            let session = SessionView::with_model_and_dir(model, None);
+            let window = gtk::Window::new();
+            window.set_default_size(400, 300);
+            window.set_child(Some(session.widget()));
+            window.present();
+
+            let ctx = glib::MainContext::default();
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
+
+            if let LayoutNode::Split { ratio, .. } = session.model.borrow().layout.root().unwrap() {
+                assert!((*ratio - 0.2).abs() < 0.01, "Initial ratio should be 0.2, got {}", ratio);
+            }
+
+            let paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
+            let controllers = paned.observe_controllers();
+            let mut click_opt = None;
+            for i in 0..controllers.n_items() {
+                if let Some(item) = controllers.item(i) {
+                    if let Some(click) = item.downcast_ref::<gtk::GestureClick>() {
+                        click_opt = Some(click.clone());
+                    }
+                }
+            }
+            let click = click_opt.expect("GestureClick must be attached to paned");
+
+            // Clicking away from separator (x=10.0 in left pane) with n_press=2 should NOT equalize
+            use glib::prelude::*;
+            click.emit_by_name::<()>("pressed", &[&2i32, &10.0f64, &100.0f64]);
+            click.emit_by_name::<()>("released", &[&2i32, &10.0f64, &100.0f64]);
+            for _ in 0..5 {
+                ctx.iteration(false);
+            }
+            if let LayoutNode::Split { ratio, .. } = session.model.borrow().layout.root().unwrap() {
+                assert!((*ratio - 0.2).abs() < 0.01, "Ratio should remain 0.2 when clicking in pane");
+            }
+
+            // Double clicking on separator (pos) should equalize to 0.5
+            let pos = paned.position() as f64;
+            click.emit_by_name::<()>("pressed", &[&2i32, &pos, &100.0f64]);
+            click.emit_by_name::<()>("released", &[&2i32, &pos, &100.0f64]);
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
+            if let LayoutNode::Split { ratio, .. } = session.model.borrow().layout.root().unwrap() {
+                assert!((*ratio - 0.5).abs() < 0.01, "Ratio must be equalized to 0.5, got {}", ratio);
+            }
 
             session.close();
         });
