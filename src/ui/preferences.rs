@@ -9,10 +9,391 @@ use crate::model::config::{AppConfig, PaneTitleStyle, WindowStyle};
 use crate::model::keybindings::{ActionCategory, ActionShortcutDef, ACTION_CATALOG};
 use crate::model::profile::{
     BadgePosition, CjkWidthPreference, CursorBlinkPreference, CursorShapePreference,
-    EraseBindingPreference, ExitActionPreference, Profile, TerminalBellPreference,
-    TextBlinkModePreference,
+    CustomHyperlinkRule, EraseBindingPreference, ExitActionPreference, Profile, ProfileSwitchRule,
+    TerminalBellPreference, TextBlinkModePreference,
 };
 use crate::model::theme::{ColorScheme, RgbColor};
+
+fn rgb_to_rgba(c: &RgbColor) -> gtk::gdk::RGBA {
+    gtk::gdk::RGBA::builder()
+        .red(c.red as f32)
+        .green(c.green as f32)
+        .blue(c.blue as f32)
+        .alpha(c.alpha as f32)
+        .build()
+}
+
+fn rgba_to_rgb(rgba: &gtk::gdk::RGBA) -> RgbColor {
+    RgbColor::new(
+        rgba.red() as f64,
+        rgba.green() as f64,
+        rgba.blue() as f64,
+        rgba.alpha() as f64,
+    )
+}
+
+fn create_token_menu_button(target_entry: &gtk::Entry) -> gtk::MenuButton {
+    let menu_btn = gtk::MenuButton::new();
+    menu_btn.set_icon_name("pan-down-symbolic");
+
+    let popover = gtk::Popover::new();
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    vbox.set_margin_top(6);
+    vbox.set_margin_bottom(6);
+    vbox.set_margin_start(6);
+    vbox.set_margin_end(6);
+
+    let tokens = [
+        "${id}: ${title}",
+        "${title}",
+        "${profile}",
+        "${directory}",
+        "${appName}",
+    ];
+
+    for tok in tokens {
+        let b = gtk::Button::with_label(tok);
+        b.add_css_class("flat");
+        b.set_halign(gtk::Align::Start);
+        let entry_clone = target_entry.clone();
+        let pop_weak = popover.downgrade();
+        let tok_str = tok.to_string();
+        b.connect_clicked(move |_| {
+            entry_clone.set_text(&tok_str);
+            if let Some(p) = pop_weak.upgrade() {
+                p.popdown();
+            }
+        });
+        vbox.append(&b);
+    }
+
+    popover.set_child(Some(&vbox));
+    menu_btn.set_popover(Some(&popover));
+    menu_btn
+}
+
+fn create_color_button() -> gtk::ColorDialogButton {
+    let dialog = gtk::ColorDialog::builder().with_alpha(false).build();
+    gtk::ColorDialogButton::new(Some(dialog))
+}
+
+fn create_font_button() -> gtk::FontDialogButton {
+    let dialog = gtk::FontDialog::new();
+    gtk::FontDialogButton::new(Some(dialog))
+}
+
+fn show_auto_switch_rule_dialog<W: IsA<gtk::Window>, F: Fn(ProfileSwitchRule) + 'static>(
+    parent: &W,
+    existing: Option<&ProfileSwitchRule>,
+    profile_id: String,
+    on_save: F,
+) {
+    let dialog = gtk::Window::builder()
+        .title(if existing.is_some() { "Edit Rule" } else { "Add Rule" })
+        .modal(true)
+        .transient_for(parent)
+        .destroy_with_parent(true)
+        .default_width(380)
+        .default_height(200)
+        .build();
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    vbox.set_margin_top(16);
+    vbox.set_margin_bottom(16);
+    vbox.set_margin_start(16);
+    vbox.set_margin_end(16);
+
+    let grid = gtk::Grid::new();
+    grid.set_column_spacing(12);
+    grid.set_row_spacing(8);
+
+    let host_lbl = gtk::Label::new(Some("Hostname"));
+    host_lbl.set_halign(gtk::Align::End);
+    let host_entry = gtk::Entry::new();
+    host_entry.set_hexpand(true);
+    if let Some(r) = existing {
+        host_entry.set_text(&r.hostname);
+    }
+
+    let dir_lbl = gtk::Label::new(Some("Directory"));
+    dir_lbl.set_halign(gtk::Align::End);
+    let dir_entry = gtk::Entry::new();
+    dir_entry.set_hexpand(true);
+    if let Some(r) = existing {
+        dir_entry.set_text(&r.directory);
+    }
+
+    grid.attach(&host_lbl, 0, 0, 1, 1);
+    grid.attach(&host_entry, 1, 0, 1, 1);
+    grid.attach(&dir_lbl, 0, 1, 1, 1);
+    grid.attach(&dir_entry, 1, 1, 1, 1);
+    vbox.append(&grid);
+
+    let hint = gtk::Label::new(Some(
+        "Enter hostname, directory, or both.\nFormat: hostname:directory",
+    ));
+    hint.add_css_class("dim-label");
+    vbox.append(&hint);
+
+    let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    btn_box.set_halign(gtk::Align::End);
+
+    let cancel_btn = gtk::Button::with_label("Cancel");
+    let save_btn = gtk::Button::with_label("Save");
+    save_btn.add_css_class("suggested-action");
+
+    btn_box.append(&cancel_btn);
+    btn_box.append(&save_btn);
+    vbox.append(&btn_box);
+
+    dialog.set_child(Some(&vbox));
+
+    let win_weak = dialog.downgrade();
+    cancel_btn.connect_clicked(move |_| {
+        if let Some(w) = win_weak.upgrade() {
+            w.close();
+        }
+    });
+
+    let win_weak = dialog.downgrade();
+    let on_save = Rc::new(on_save);
+    save_btn.connect_clicked(move |_| {
+        let h = host_entry.text().to_string().trim().to_string();
+        let d = dir_entry.text().to_string().trim().to_string();
+        if h.is_empty() && d.is_empty() {
+            return;
+        }
+        on_save(ProfileSwitchRule {
+            hostname: h,
+            directory: d,
+            profile_id: profile_id.clone(),
+        });
+        if let Some(w) = win_weak.upgrade() {
+            w.close();
+        }
+    });
+
+    dialog.present();
+}
+
+fn show_custom_links_dialog<W: IsA<gtk::Window>, F: Fn(Vec<CustomHyperlinkRule>) + 'static>(
+    parent: &W,
+    initial_links: Vec<CustomHyperlinkRule>,
+    on_save: F,
+) {
+    let dialog = gtk::Window::builder()
+        .title("Custom Links")
+        .modal(true)
+        .transient_for(parent)
+        .destroy_with_parent(true)
+        .default_width(480)
+        .default_height(360)
+        .build();
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    vbox.set_margin_top(12);
+    vbox.set_margin_bottom(12);
+    vbox.set_margin_start(16);
+    vbox.set_margin_end(16);
+
+    let links_rc = Rc::new(RefCell::new(initial_links));
+    let list_box = gtk::ListBox::new();
+    list_box.set_selection_mode(gtk::SelectionMode::Single);
+
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_vexpand(true);
+    scrolled.set_child(Some(&list_box));
+    let frame = gtk::Frame::new(None);
+    frame.set_child(Some(&scrolled));
+    vbox.append(&frame);
+
+    let refresh_list = {
+        let links_rc = Rc::clone(&links_rc);
+        let list_box = list_box.clone();
+        Rc::new(move || {
+            while let Some(child) = list_box.first_child() {
+                list_box.remove(&child);
+            }
+            for link in links_rc.borrow().iter() {
+                let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                row_box.set_margin_top(4);
+                row_box.set_margin_bottom(4);
+                row_box.set_margin_start(8);
+                row_box.set_margin_end(8);
+
+                let name_lbl = gtk::Label::new(Some(&link.name));
+                name_lbl.add_css_class("heading");
+                let pat_lbl = gtk::Label::new(Some(&format!("({})", link.pattern)));
+                pat_lbl.add_css_class("dim-label");
+
+                row_box.append(&name_lbl);
+                row_box.append(&pat_lbl);
+                list_box.append(&row_box);
+            }
+        })
+    };
+    refresh_list();
+
+    let btn_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    btn_bar.set_halign(gtk::Align::End);
+
+    let add_btn = gtk::Button::with_label("Add");
+    let del_btn = gtk::Button::with_label("Delete");
+    let close_btn = gtk::Button::with_label("Close");
+    close_btn.add_css_class("suggested-action");
+
+    btn_bar.append(&add_btn);
+    btn_bar.append(&del_btn);
+    btn_bar.append(&close_btn);
+    vbox.append(&btn_bar);
+
+    dialog.set_child(Some(&vbox));
+
+    // Delete
+    {
+        let links_rc = Rc::clone(&links_rc);
+        let list_box = list_box.clone();
+        let refresh_list = Rc::clone(&refresh_list);
+        del_btn.connect_clicked(move |_| {
+            if let Some(row) = list_box.selected_row() {
+                let idx = row.index() as usize;
+                let mut links = links_rc.borrow_mut();
+                if idx < links.len() {
+                    links.remove(idx);
+                    drop(links);
+                    refresh_list();
+                }
+            }
+        });
+    }
+
+    // Add
+    {
+        let links_rc = Rc::clone(&links_rc);
+        let refresh_list = Rc::clone(&refresh_list);
+        let dia_weak = dialog.downgrade();
+        add_btn.connect_clicked(move |_| {
+            let Some(parent_win) = dia_weak.upgrade() else { return; };
+            show_edit_link_dialog(&parent_win, None, {
+                let links_rc = Rc::clone(&links_rc);
+                let refresh_list = Rc::clone(&refresh_list);
+                move |new_link| {
+                    links_rc.borrow_mut().push(new_link);
+                    refresh_list();
+                }
+            });
+        });
+    }
+
+    // Close
+    {
+        let win_weak = dialog.downgrade();
+        let links_rc = Rc::clone(&links_rc);
+        close_btn.connect_clicked(move |_| {
+            let final_links = links_rc.borrow().clone();
+            on_save(final_links);
+            if let Some(w) = win_weak.upgrade() {
+                w.close();
+            }
+        });
+    }
+
+    dialog.present();
+}
+
+fn show_edit_link_dialog<W: IsA<gtk::Window>, F: Fn(CustomHyperlinkRule) + 'static>(
+    parent: &W,
+    existing: Option<&CustomHyperlinkRule>,
+    on_save: F,
+) {
+    let dialog = gtk::Window::builder()
+        .title(if existing.is_some() { "Edit Link" } else { "Add Link" })
+        .modal(true)
+        .transient_for(parent)
+        .destroy_with_parent(true)
+        .default_width(360)
+        .default_height(200)
+        .build();
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    vbox.set_margin_top(12);
+    vbox.set_margin_bottom(12);
+    vbox.set_margin_start(16);
+    vbox.set_margin_end(16);
+
+    let grid = gtk::Grid::new();
+    grid.set_column_spacing(10);
+    grid.set_row_spacing(8);
+
+    let name_lbl = gtk::Label::new(Some("Name"));
+    name_lbl.set_halign(gtk::Align::End);
+    let name_entry = gtk::Entry::new();
+    name_entry.set_hexpand(true);
+    if let Some(e) = existing {
+        name_entry.set_text(&e.name);
+    }
+
+    let pat_lbl = gtk::Label::new(Some("Pattern (regex)"));
+    pat_lbl.set_halign(gtk::Align::End);
+    let pat_entry = gtk::Entry::new();
+    pat_entry.set_hexpand(true);
+    if let Some(e) = existing {
+        pat_entry.set_text(&e.pattern);
+    }
+
+    let uri_lbl = gtk::Label::new(Some("URI"));
+    uri_lbl.set_halign(gtk::Align::End);
+    let uri_entry = gtk::Entry::new();
+    uri_entry.set_hexpand(true);
+    if let Some(e) = existing {
+        uri_entry.set_text(&e.uri);
+    }
+
+    grid.attach(&name_lbl, 0, 0, 1, 1);
+    grid.attach(&name_entry, 1, 0, 1, 1);
+    grid.attach(&pat_lbl, 0, 1, 1, 1);
+    grid.attach(&pat_entry, 1, 1, 1, 1);
+    grid.attach(&uri_lbl, 0, 2, 1, 1);
+    grid.attach(&uri_entry, 1, 2, 1, 1);
+    vbox.append(&grid);
+
+    let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    btn_box.set_halign(gtk::Align::End);
+    let cancel_btn = gtk::Button::with_label("Cancel");
+    let save_btn = gtk::Button::with_label("Save");
+    save_btn.add_css_class("suggested-action");
+    btn_box.append(&cancel_btn);
+    btn_box.append(&save_btn);
+    vbox.append(&btn_box);
+
+    dialog.set_child(Some(&vbox));
+
+    let win_weak = dialog.downgrade();
+    cancel_btn.connect_clicked(move |_| {
+        if let Some(w) = win_weak.upgrade() {
+            w.close();
+        }
+    });
+
+    let win_weak = dialog.downgrade();
+    save_btn.connect_clicked(move |_| {
+        let n = name_entry.text().to_string().trim().to_string();
+        let p = pat_entry.text().to_string().trim().to_string();
+        let u = uri_entry.text().to_string().trim().to_string();
+        if !n.is_empty() && !p.is_empty() {
+            on_save(CustomHyperlinkRule {
+                name: n,
+                pattern: p,
+                uri: u,
+            });
+            if let Some(w) = win_weak.upgrade() {
+                w.close();
+            }
+        }
+    });
+
+    dialog.present();
+}
 
 #[allow(deprecated)]
 pub struct TilixPreferencesWindow {
@@ -39,465 +420,789 @@ impl TilixPreferencesWindow {
         let on_change = Rc::new(on_profile_changed);
 
         // =========================================================================
-        // PROFILES PAGE
+        // PROFILES PAGE (100% UI Parity with Original Tilix)
         // =========================================================================
         let profiles_page = adw::PreferencesPage::new();
         profiles_page.set_title("Profiles");
         profiles_page.set_icon_name(Some("org.gnome.Settings-symbolic"));
 
-        let mgmt_group = adw::PreferencesGroup::new();
-        mgmt_group.set_title("Profile Selection and Management");
+        // Top Profile Management Header Bar
+        let profile_header_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        profile_header_box.set_margin_top(8);
+        profile_header_box.set_margin_bottom(8);
+        profile_header_box.set_margin_start(12);
+        profile_header_box.set_margin_end(12);
 
-        // Profile selector combo
-        let profile_combo = adw::ComboRow::new();
-        profile_combo.set_title("Selected Profile");
+        let profile_lbl = gtk::Label::new(Some("Profile:"));
+        profile_lbl.set_markup("<b>Profile:</b>");
+        profile_header_box.append(&profile_lbl);
 
-        // Action buttons
-        let actions_row = adw::ActionRow::new();
-        actions_row.set_title("Profile Actions");
-        let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        btn_box.set_valign(gtk::Align::Center);
+        let profile_dropdown = gtk::DropDown::new(None::<gtk::StringList>, gtk::Expression::NONE);
+        profile_dropdown.set_hexpand(false);
+        profile_header_box.append(&profile_dropdown);
 
         let add_btn = gtk::Button::with_label("New");
         add_btn.set_tooltip_text(Some("Create a new profile"));
-        add_btn.add_css_class("flat");
+        profile_header_box.append(&add_btn);
 
         let dup_btn = gtk::Button::with_label("Duplicate");
         dup_btn.set_tooltip_text(Some("Duplicate selected profile"));
-        dup_btn.add_css_class("flat");
+        profile_header_box.append(&dup_btn);
 
         let del_btn = gtk::Button::with_label("Delete");
         del_btn.set_tooltip_text(Some("Delete selected profile"));
-        del_btn.add_css_class("flat");
         del_btn.add_css_class("destructive-action");
+        profile_header_box.append(&del_btn);
 
         let set_def_btn = gtk::Button::with_label("Set as Default");
         set_def_btn.set_tooltip_text(Some("Make this profile the default"));
-        set_def_btn.add_css_class("flat");
+        profile_header_box.append(&set_def_btn);
 
-        btn_box.append(&add_btn);
-        btn_box.append(&dup_btn);
-        btn_box.append(&del_btn);
-        btn_box.append(&set_def_btn);
-        actions_row.add_suffix(&btn_box);
-
-        // Section tab combo
-        let section_names = [
-            "General",
-            "Command",
-            "Color",
-            "Scrolling",
-            "Compatibility",
-            "Badge",
-            "Advanced",
-        ];
-        let section_model = gtk::StringList::new(&section_names);
-        let section_combo = adw::ComboRow::new();
-        section_combo.set_title("Settings Section");
-        section_combo.set_model(Some(&section_model));
-        section_combo.set_selected(0);
-
-        mgmt_group.add(&profile_combo);
-        mgmt_group.add(&actions_row);
-        mgmt_group.add(&section_combo);
-        profiles_page.add(&mgmt_group);
+        // Main Tab Notebook
+        let notebook = gtk::Notebook::new();
+        notebook.set_hexpand(true);
+        notebook.set_vexpand(true);
 
         // -------------------------------------------------------------------------
         // 1. General Tab
         // -------------------------------------------------------------------------
-        let general_group = adw::PreferencesGroup::new();
-        general_group.set_title("General Settings");
+        let gen_grid = gtk::Grid::new();
+        gen_grid.set_column_spacing(12);
+        gen_grid.set_row_spacing(8);
+        gen_grid.set_margin_start(16);
+        gen_grid.set_margin_end(16);
+        gen_grid.set_margin_top(16);
+        gen_grid.set_margin_bottom(16);
 
-        let prof_name_row = adw::EntryRow::new();
-        prof_name_row.set_title("Profile Name");
+        // Profile name
+        let name_lbl = gtk::Label::new(Some("Profile name"));
+        name_lbl.set_halign(gtk::Align::End);
+        name_lbl.set_xalign(1.0);
+        let name_entry = gtk::Entry::new();
+        name_entry.set_hexpand(true);
+        gen_grid.attach(&name_lbl, 0, 0, 1, 1);
+        gen_grid.attach(&name_entry, 1, 0, 1, 1);
 
-        let prof_title_row = adw::EntryRow::new();
-        prof_title_row.set_title("Terminal Title Format");
+        // Terminal title
+        let title_lbl = gtk::Label::new(Some("Terminal title"));
+        title_lbl.set_halign(gtk::Align::End);
+        title_lbl.set_xalign(1.0);
+        let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let title_entry = gtk::Entry::new();
+        title_entry.set_hexpand(true);
+        let title_token_btn = create_token_menu_button(&title_entry);
+        title_box.append(&title_entry);
+        title_box.append(&title_token_btn);
+        gen_grid.attach(&title_lbl, 0, 1, 1, 1);
+        gen_grid.attach(&title_box, 1, 1, 1, 1);
 
+        // Section Text Appearance
+        let text_app_lbl = gtk::Label::new(None);
+        text_app_lbl.set_markup("<b>Text Appearance</b>");
+        text_app_lbl.set_halign(gtk::Align::Start);
+        text_app_lbl.set_xalign(0.0);
+        text_app_lbl.set_margin_top(10);
+        gen_grid.attach(&text_app_lbl, 0, 2, 2, 1);
+
+        // Terminal size
+        let size_lbl = gtk::Label::new(Some("Terminal size"));
+        size_lbl.set_halign(gtk::Align::End);
+        size_lbl.set_xalign(1.0);
+        let size_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let cols_adj = gtk::Adjustment::new(80.0, 20.0, 500.0, 1.0, 10.0, 0.0);
-        let cols_row = adw::SpinRow::new(Some(&cols_adj), 1.0, 0);
-        cols_row.set_title("Initial Columns");
-
+        let cols_spin = gtk::SpinButton::new(Some(&cols_adj), 1.0, 0);
+        let cols_lbl = gtk::Label::new(Some("columns"));
         let rows_adj = gtk::Adjustment::new(24.0, 5.0, 200.0, 1.0, 5.0, 0.0);
-        let rows_row = adw::SpinRow::new(Some(&rows_adj), 1.0, 0);
-        rows_row.set_title("Initial Rows");
+        let rows_spin = gtk::SpinButton::new(Some(&rows_adj), 1.0, 0);
+        let rows_lbl = gtk::Label::new(Some("rows"));
+        let size_reset_btn = gtk::Button::with_label("Reset");
+        size_box.append(&cols_spin);
+        size_box.append(&cols_lbl);
+        size_box.append(&rows_spin);
+        size_box.append(&rows_lbl);
+        size_box.append(&size_reset_btn);
+        gen_grid.attach(&size_lbl, 0, 3, 1, 1);
+        gen_grid.attach(&size_box, 1, 3, 1, 1);
 
-        let cell_w_adj = gtk::Adjustment::new(1.0, 1.0, 2.0, 0.05, 0.1, 0.0);
-        let cell_w_row = adw::SpinRow::new(Some(&cell_w_adj), 0.05, 2);
-        cell_w_row.set_title("Cell Width Scale");
+        // Cell spacing
+        let spacing_lbl = gtk::Label::new(Some("Cell spacing"));
+        spacing_lbl.set_halign(gtk::Align::End);
+        spacing_lbl.set_xalign(1.0);
+        let spacing_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let cell_w_adj = gtk::Adjustment::new(1.0, 0.5, 2.0, 0.1, 0.2, 0.0);
+        let cell_w_spin = gtk::SpinButton::new(Some(&cell_w_adj), 0.1, 1);
+        let cell_w_lbl = gtk::Label::new(Some("width"));
+        let cell_h_adj = gtk::Adjustment::new(1.0, 0.5, 2.0, 0.1, 0.2, 0.0);
+        let cell_h_spin = gtk::SpinButton::new(Some(&cell_h_adj), 0.1, 1);
+        let cell_h_lbl = gtk::Label::new(Some("height"));
+        let spacing_reset_btn = gtk::Button::with_label("Reset");
+        spacing_box.append(&cell_w_spin);
+        spacing_box.append(&cell_w_lbl);
+        spacing_box.append(&cell_h_spin);
+        spacing_box.append(&cell_h_lbl);
+        spacing_box.append(&spacing_reset_btn);
+        gen_grid.attach(&spacing_lbl, 0, 4, 1, 1);
+        gen_grid.attach(&spacing_box, 1, 4, 1, 1);
 
-        let cell_h_adj = gtk::Adjustment::new(1.0, 1.0, 2.0, 0.05, 0.1, 0.0);
-        let cell_h_row = adw::SpinRow::new(Some(&cell_h_adj), 0.05, 2);
-        cell_h_row.set_title("Cell Height Scale");
+        // Margin
+        let margin_lbl = gtk::Label::new(Some("Margin"));
+        margin_lbl.set_halign(gtk::Align::End);
+        margin_lbl.set_xalign(1.0);
+        let margin_adj = gtk::Adjustment::new(80.0, 0.0, 500.0, 1.0, 10.0, 0.0);
+        let margin_spin = gtk::SpinButton::new(Some(&margin_adj), 1.0, 0);
+        gen_grid.attach(&margin_lbl, 0, 5, 1, 1);
+        gen_grid.attach(&margin_spin, 1, 5, 1, 1);
 
-        let margin_adj = gtk::Adjustment::new(0.0, 0.0, 500.0, 1.0, 10.0, 0.0);
-        let margin_row = adw::SpinRow::new(Some(&margin_adj), 1.0, 0);
-        margin_row.set_title("Margin Column (0 = Disabled)");
-
+        // Text blink mode
+        let blink_lbl = gtk::Label::new(Some("Text blink mode"));
+        blink_lbl.set_halign(gtk::Align::End);
+        blink_lbl.set_xalign(1.0);
         let blink_names = ["Never", "Focused", "Unfocused", "Always"];
-        let blink_mode_model = gtk::StringList::new(&blink_names);
-        let blink_mode_row = adw::ComboRow::new();
-        blink_mode_row.set_title("Text Blink Mode");
-        blink_mode_row.set_model(Some(&blink_mode_model));
+        let blink_model = gtk::StringList::new(&blink_names);
+        let blink_combo = gtk::DropDown::new(Some(blink_model), gtk::Expression::NONE);
+        gen_grid.attach(&blink_lbl, 0, 6, 1, 1);
+        gen_grid.attach(&blink_combo, 1, 6, 1, 1);
 
-        let allow_bold_row = adw::SwitchRow::new();
-        allow_bold_row.set_title("Allow Bold Text");
+        // Custom font
+        let custom_font_lbl = gtk::Label::new(Some("Custom font"));
+        custom_font_lbl.set_halign(gtk::Align::End);
+        custom_font_lbl.set_xalign(1.0);
+        let font_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let custom_font_check = gtk::CheckButton::new();
+        let font_btn = create_font_button();
+        font_box.append(&custom_font_check);
+        font_box.append(&font_btn);
+        gen_grid.attach(&custom_font_lbl, 0, 7, 1, 1);
+        gen_grid.attach(&font_box, 1, 7, 1, 1);
 
-        let rewrap_row = adw::SwitchRow::new();
-        rewrap_row.set_title("Rewrap on Resize");
+        // Word-wise select chars
+        let word_lbl = gtk::Label::new(Some("Word-wise select chars"));
+        word_lbl.set_halign(gtk::Align::End);
+        word_lbl.set_xalign(1.0);
+        let word_entry = gtk::Entry::new();
+        word_entry.set_hexpand(true);
+        gen_grid.attach(&word_lbl, 0, 8, 1, 1);
+        gen_grid.attach(&word_entry, 1, 8, 1, 1);
 
-        let system_font_row = adw::SwitchRow::new();
-        system_font_row.set_title("Use System Monospace Font");
+        // Section Cursor
+        let cursor_sec_lbl = gtk::Label::new(None);
+        cursor_sec_lbl.set_markup("<b>Cursor</b>");
+        cursor_sec_lbl.set_halign(gtk::Align::Start);
+        cursor_sec_lbl.set_xalign(0.0);
+        cursor_sec_lbl.set_margin_top(10);
+        gen_grid.attach(&cursor_sec_lbl, 0, 9, 2, 1);
 
-        let font_row = adw::EntryRow::new();
-        font_row.set_title("Custom Font");
-
-        let word_chars_row = adw::EntryRow::new();
-        word_chars_row.set_title("Word Selection Characters");
-
+        // Cursor shape
+        let cursor_shape_lbl = gtk::Label::new(Some("Cursor"));
+        cursor_shape_lbl.set_halign(gtk::Align::End);
+        cursor_shape_lbl.set_xalign(1.0);
         let shape_names = ["Block", "I-Beam", "Underline"];
         let shape_model = gtk::StringList::new(&shape_names);
-        let cursor_shape_row = adw::ComboRow::new();
-        cursor_shape_row.set_title("Cursor Shape");
-        cursor_shape_row.set_model(Some(&shape_model));
+        let cursor_shape_combo = gtk::DropDown::new(Some(shape_model), gtk::Expression::NONE);
+        gen_grid.attach(&cursor_shape_lbl, 0, 10, 1, 1);
+        gen_grid.attach(&cursor_shape_combo, 1, 10, 1, 1);
 
+        // Cursor blink mode
+        let cursor_blink_lbl = gtk::Label::new(Some("Cursor blink mode"));
+        cursor_blink_lbl.set_halign(gtk::Align::End);
+        cursor_blink_lbl.set_xalign(1.0);
         let cblink_names = ["System", "On", "Off"];
         let cblink_model = gtk::StringList::new(&cblink_names);
-        let cursor_blink_row = adw::ComboRow::new();
-        cursor_blink_row.set_title("Cursor Blink");
-        cursor_blink_row.set_model(Some(&cblink_model));
+        let cursor_blink_combo = gtk::DropDown::new(Some(cblink_model), gtk::Expression::NONE);
+        gen_grid.attach(&cursor_blink_lbl, 0, 11, 1, 1);
+        gen_grid.attach(&cursor_blink_combo, 1, 11, 1, 1);
 
-        let bell_names = ["None", "Sound", "Icon", "Icon and Sound"];
+        // Section Notification
+        let notif_sec_lbl = gtk::Label::new(None);
+        notif_sec_lbl.set_markup("<b>Notification</b>");
+        notif_sec_lbl.set_halign(gtk::Align::Start);
+        notif_sec_lbl.set_xalign(0.0);
+        notif_sec_lbl.set_margin_top(10);
+        gen_grid.attach(&notif_sec_lbl, 0, 12, 2, 1);
+
+        // Terminal bell
+        let bell_lbl = gtk::Label::new(Some("Terminal bell"));
+        bell_lbl.set_halign(gtk::Align::End);
+        bell_lbl.set_xalign(1.0);
+        let bell_names = ["None", "Sound", "Icon", "Icon and sound"];
         let bell_model = gtk::StringList::new(&bell_names);
-        let bell_row = adw::ComboRow::new();
-        bell_row.set_title("Terminal Bell");
-        bell_row.set_model(Some(&bell_model));
+        let bell_combo = gtk::DropDown::new(Some(bell_model), gtk::Expression::NONE);
+        gen_grid.attach(&bell_lbl, 0, 13, 1, 1);
+        gen_grid.attach(&bell_combo, 1, 13, 1, 1);
 
-        general_group.add(&prof_name_row);
-        general_group.add(&prof_title_row);
-        general_group.add(&cols_row);
-        general_group.add(&rows_row);
-        general_group.add(&cell_w_row);
-        general_group.add(&cell_h_row);
-        general_group.add(&margin_row);
-        general_group.add(&blink_mode_row);
-        general_group.add(&allow_bold_row);
-        general_group.add(&rewrap_row);
-        general_group.add(&system_font_row);
-        general_group.add(&font_row);
-        general_group.add(&word_chars_row);
-        general_group.add(&cursor_shape_row);
-        general_group.add(&cursor_blink_row);
-        general_group.add(&bell_row);
-        profiles_page.add(&general_group);
+        let gen_scrolled = gtk::ScrolledWindow::new();
+        gen_scrolled.set_child(Some(&gen_grid));
+        notebook.append_page(&gen_scrolled, Some(&gtk::Label::new(Some("General"))));
 
         // -------------------------------------------------------------------------
         // 2. Command Tab
         // -------------------------------------------------------------------------
-        let command_group = adw::PreferencesGroup::new();
-        command_group.set_title("Command and Execution");
+        let cmd_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        cmd_box.set_margin_start(16);
+        cmd_box.set_margin_end(16);
+        cmd_box.set_margin_top(16);
+        cmd_box.set_margin_bottom(16);
 
-        let login_shell_row = adw::SwitchRow::new();
-        login_shell_row.set_title("Run Command as Login Shell");
+        let login_shell_check = gtk::CheckButton::with_label("Run command as a login shell");
+        let custom_cmd_check = gtk::CheckButton::with_label("Run a custom command instead of my shell");
 
-        let use_custom_cmd_row = adw::SwitchRow::new();
-        use_custom_cmd_row.set_title("Run a Custom Command Instead of Shell");
+        let custom_cmd_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        custom_cmd_box.set_margin_start(24);
+        let custom_cmd_lbl = gtk::Label::new(Some("Command"));
+        let custom_cmd_entry = gtk::Entry::new();
+        custom_cmd_entry.set_hexpand(true);
+        custom_cmd_box.append(&custom_cmd_lbl);
+        custom_cmd_box.append(&custom_cmd_entry);
 
-        let custom_cmd_row = adw::EntryRow::new();
-        custom_cmd_row.set_title("Custom Command");
+        let exit_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let exit_lbl = gtk::Label::new(Some("When command exits"));
+        let exit_names = ["Exit the terminal", "Restart the command", "Hold the terminal open"];
+        let exit_model = gtk::StringList::new(&exit_names);
+        let exit_action_combo = gtk::DropDown::new(Some(exit_model), gtk::Expression::NONE);
+        exit_box.append(&exit_lbl);
+        exit_box.append(&exit_action_combo);
 
-        let exit_action_names = ["Close Terminal", "Restart Process", "Hold Terminal Open"];
-        let exit_action_model = gtk::StringList::new(&exit_action_names);
-        let exit_action_row = adw::ComboRow::new();
-        exit_action_row.set_title("When Command Exits");
-        exit_action_row.set_model(Some(&exit_action_model));
+        cmd_box.append(&login_shell_check);
+        cmd_box.append(&custom_cmd_check);
+        cmd_box.append(&custom_cmd_box);
+        cmd_box.append(&exit_box);
 
-        command_group.add(&login_shell_row);
-        command_group.add(&use_custom_cmd_row);
-        command_group.add(&custom_cmd_row);
-        command_group.add(&exit_action_row);
-        profiles_page.add(&command_group);
+        notebook.append_page(&cmd_box, Some(&gtk::Label::new(Some("Command"))));
 
         // -------------------------------------------------------------------------
         // 3. Color Tab
         // -------------------------------------------------------------------------
-        let colors_group = adw::PreferencesGroup::new();
-        colors_group.set_title("Color Scheme and Overrides");
+        let color_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        color_box.set_margin_start(16);
+        color_box.set_margin_end(16);
+        color_box.set_margin_top(16);
+        color_box.set_margin_bottom(16);
 
-        let color_names = ["Tilix Dark", "Tilix Light", "Solarized Dark", "Monokai"];
-        let color_model = gtk::StringList::new(&color_names);
-        let color_preset_row = adw::ComboRow::new();
-        color_preset_row.set_title("Preset Color Scheme");
-        color_preset_row.set_model(Some(&color_model));
+        // Top Row: Color scheme + Export
+        let scheme_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let scheme_lbl = gtk::Label::new(None);
+        scheme_lbl.set_markup("<b>Color scheme</b>");
+        let scheme_names = ["Tilix Dark", "Tilix Light", "Solarized Dark", "Monokai", "Custom"];
+        let scheme_model = gtk::StringList::new(&scheme_names);
+        let color_scheme_combo = gtk::DropDown::new(Some(scheme_model), gtk::Expression::NONE);
+        color_scheme_combo.set_hexpand(true);
+        let export_btn = gtk::Button::with_label("Export");
+        scheme_row.append(&scheme_lbl);
+        scheme_row.append(&color_scheme_combo);
+        scheme_row.append(&export_btn);
+        color_box.append(&scheme_row);
 
-        let use_theme_colors_row = adw::SwitchRow::new();
-        use_theme_colors_row.set_title("Use System Theme Colors");
+        // Color palette section
+        let pal_section_box = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        let pal_title_lbl = gtk::Label::new(None);
+        pal_title_lbl.set_markup("<b>Color palette</b>");
+        pal_title_lbl.set_valign(gtk::Align::Start);
+        pal_section_box.append(&pal_title_lbl);
 
-        let bg_trans_adj = gtk::Adjustment::new(0.0, 0.0, 100.0, 1.0, 5.0, 0.0);
-        let bg_trans_row = adw::SpinRow::new(Some(&bg_trans_adj), 1.0, 0);
-        bg_trans_row.set_title("Background Transparency (%)");
+        let pal_grid = gtk::Grid::new();
+        pal_grid.set_column_spacing(32);
+        pal_grid.set_row_spacing(8);
 
-        let dim_unfocus_adj = gtk::Adjustment::new(0.0, 0.0, 100.0, 1.0, 5.0, 0.0);
-        let dim_unfocus_row = adw::SpinRow::new(Some(&dim_unfocus_adj), 1.0, 0);
-        dim_unfocus_row.set_title("Dim Unfocused Terminal (%)");
+        let bg_color_btn = create_color_button();
+        let fg_color_btn = create_color_button();
+        let mut palette_buttons: Vec<gtk::ColorDialogButton> = Vec::with_capacity(16);
+        for _ in 0..16 {
+            palette_buttons.push(create_color_button());
+        }
 
-        let bold_override_row = adw::SwitchRow::new();
-        bold_override_row.set_title("Override Bold Color");
+        // Left column
+        let bg_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        bg_box.append(&bg_color_btn);
+        bg_box.append(&gtk::Label::new(Some("Background")));
+        pal_grid.attach(&bg_box, 0, 0, 1, 1);
 
-        let bold_color_row = adw::EntryRow::new();
-        bold_color_row.set_title("Bold Color (Hex)");
+        let b0_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        b0_box.append(&palette_buttons[0]);
+        b0_box.append(&palette_buttons[8]);
+        b0_box.append(&gtk::Label::new(Some("Black")));
+        pal_grid.attach(&b0_box, 0, 1, 1, 1);
 
-        let bold_is_bright_row = adw::SwitchRow::new();
-        bold_is_bright_row.set_title("Show Bold Text in Bright Colors");
+        let b1_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        b1_box.append(&palette_buttons[1]);
+        b1_box.append(&palette_buttons[9]);
+        b1_box.append(&gtk::Label::new(Some("Red")));
+        pal_grid.attach(&b1_box, 0, 2, 1, 1);
 
-        let cursor_override_row = adw::SwitchRow::new();
-        cursor_override_row.set_title("Override Cursor Colors");
+        let b2_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        b2_box.append(&palette_buttons[2]);
+        b2_box.append(&palette_buttons[10]);
+        b2_box.append(&gtk::Label::new(Some("Green")));
+        pal_grid.attach(&b2_box, 0, 3, 1, 1);
 
-        let cursor_bg_row = adw::EntryRow::new();
-        cursor_bg_row.set_title("Cursor Background (Hex)");
+        let b3_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        b3_box.append(&palette_buttons[3]);
+        b3_box.append(&palette_buttons[11]);
+        b3_box.append(&gtk::Label::new(Some("Orange")));
+        pal_grid.attach(&b3_box, 0, 4, 1, 1);
 
-        let cursor_fg_row = adw::EntryRow::new();
-        cursor_fg_row.set_title("Cursor Foreground (Hex)");
+        // Right column
+        let fg_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        fg_box.append(&fg_color_btn);
+        fg_box.append(&gtk::Label::new(Some("Foreground")));
+        pal_grid.attach(&fg_box, 1, 0, 1, 1);
 
-        let highlight_override_row = adw::SwitchRow::new();
-        highlight_override_row.set_title("Override Highlight Colors");
+        let b4_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        b4_box.append(&palette_buttons[4]);
+        b4_box.append(&palette_buttons[12]);
+        b4_box.append(&gtk::Label::new(Some("Blue")));
+        pal_grid.attach(&b4_box, 1, 1, 1, 1);
 
-        let highlight_bg_row = adw::EntryRow::new();
-        highlight_bg_row.set_title("Highlight Background (Hex)");
+        let b5_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        b5_box.append(&palette_buttons[5]);
+        b5_box.append(&palette_buttons[13]);
+        b5_box.append(&gtk::Label::new(Some("Purple")));
+        pal_grid.attach(&b5_box, 1, 2, 1, 1);
 
-        let highlight_fg_row = adw::EntryRow::new();
-        highlight_fg_row.set_title("Highlight Foreground (Hex)");
+        let b6_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        b6_box.append(&palette_buttons[6]);
+        b6_box.append(&palette_buttons[14]);
+        b6_box.append(&gtk::Label::new(Some("Turquoise")));
+        pal_grid.attach(&b6_box, 1, 3, 1, 1);
 
-        colors_group.add(&color_preset_row);
-        colors_group.add(&use_theme_colors_row);
-        colors_group.add(&bg_trans_row);
-        colors_group.add(&dim_unfocus_row);
-        colors_group.add(&bold_override_row);
-        colors_group.add(&bold_color_row);
-        colors_group.add(&bold_is_bright_row);
-        colors_group.add(&cursor_override_row);
-        colors_group.add(&cursor_bg_row);
-        colors_group.add(&cursor_fg_row);
-        colors_group.add(&highlight_override_row);
-        colors_group.add(&highlight_bg_row);
-        colors_group.add(&highlight_fg_row);
-        profiles_page.add(&colors_group);
+        let b7_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        b7_box.append(&palette_buttons[7]);
+        b7_box.append(&palette_buttons[15]);
+        b7_box.append(&gtk::Label::new(Some("Grey")));
+        pal_grid.attach(&b7_box, 1, 4, 1, 1);
+
+        pal_section_box.append(&pal_grid);
+        color_box.append(&pal_section_box);
+
+        // Options section
+        let opt_title_lbl = gtk::Label::new(None);
+        opt_title_lbl.set_markup("<b>Options</b>");
+        opt_title_lbl.set_halign(gtk::Align::Start);
+        color_box.append(&opt_title_lbl);
+
+        let theme_colors_check = gtk::CheckButton::with_label("Use theme colors for foreground/background");
+        let advanced_btn = gtk::MenuButton::new();
+        let adv_btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        adv_btn_box.append(&gtk::Label::new(Some("Advanced")));
+        adv_btn_box.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
+        advanced_btn.set_child(Some(&adv_btn_box));
+
+        // Advanced Popover for Color Overrides
+        let adv_popover = gtk::Popover::new();
+        let adv_pop_vbox = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        adv_pop_vbox.set_margin_top(10);
+        adv_pop_vbox.set_margin_bottom(10);
+        adv_pop_vbox.set_margin_start(10);
+        adv_pop_vbox.set_margin_end(10);
+
+        let bold_override_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let bold_override_check = gtk::CheckButton::with_label("Override Bold Color");
+        let bold_color_btn = create_color_button();
+        bold_override_box.append(&bold_override_check);
+        bold_override_box.append(&bold_color_btn);
+        adv_pop_vbox.append(&bold_override_box);
+
+        let cur_override_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let cursor_override_check = gtk::CheckButton::with_label("Override Cursor Colors");
+        let cursor_bg_btn = create_color_button();
+        let cursor_fg_btn = create_color_button();
+        cur_override_box.append(&cursor_override_check);
+        cur_override_box.append(&cursor_bg_btn);
+        cur_override_box.append(&cursor_fg_btn);
+        adv_pop_vbox.append(&cur_override_box);
+
+        let hl_override_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let highlight_override_check = gtk::CheckButton::with_label("Override Highlight Colors");
+        let hl_bg_btn = create_color_button();
+        let hl_fg_btn = create_color_button();
+        hl_override_box.append(&highlight_override_check);
+        hl_override_box.append(&hl_bg_btn);
+        hl_override_box.append(&hl_fg_btn);
+        adv_pop_vbox.append(&hl_override_box);
+
+        adv_popover.set_child(Some(&adv_pop_vbox));
+        advanced_btn.set_popover(Some(&adv_popover));
+
+        let opt_row1 = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        opt_row1.append(&theme_colors_check);
+        opt_row1.append(&advanced_btn);
+        color_box.append(&opt_row1);
+
+        let bold_bright_check = gtk::CheckButton::with_label("Show bold text in bright colors");
+        color_box.append(&bold_bright_check);
+
+        // Sliders
+        let slider_grid = gtk::Grid::new();
+        slider_grid.set_column_spacing(12);
+        slider_grid.set_row_spacing(8);
+
+        let trans_lbl = gtk::Label::new(Some("Transparency"));
+        trans_lbl.set_halign(gtk::Align::End);
+        trans_lbl.set_xalign(1.0);
+        let trans_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+        trans_scale.set_draw_value(false);
+        trans_scale.set_hexpand(true);
+        slider_grid.attach(&trans_lbl, 0, 0, 1, 1);
+        slider_grid.attach(&trans_scale, 1, 0, 1, 1);
+
+        let dim_lbl = gtk::Label::new(Some("Unfocused dim"));
+        dim_lbl.set_halign(gtk::Align::End);
+        dim_lbl.set_xalign(1.0);
+        let dim_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+        dim_scale.set_draw_value(false);
+        dim_scale.set_hexpand(true);
+        slider_grid.attach(&dim_lbl, 0, 1, 1, 1);
+        slider_grid.attach(&dim_scale, 1, 1, 1, 1);
+
+        color_box.append(&slider_grid);
+
+        let color_scrolled = gtk::ScrolledWindow::new();
+        color_scrolled.set_child(Some(&color_box));
+        notebook.append_page(&color_scrolled, Some(&gtk::Label::new(Some("Color"))));
 
         // -------------------------------------------------------------------------
         // 4. Scrolling Tab
         // -------------------------------------------------------------------------
-        let scrolling_group = adw::PreferencesGroup::new();
-        scrolling_group.set_title("Scrolling Behavior");
+        let scroll_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        scroll_box.set_margin_start(16);
+        scroll_box.set_margin_end(16);
+        scroll_box.set_margin_top(16);
+        scroll_box.set_margin_bottom(16);
 
-        let show_scrollbar_row = adw::SwitchRow::new();
-        show_scrollbar_row.set_title("Show Scrollbar");
+        let scrollbar_check = gtk::CheckButton::with_label("Show scrollbar");
+        let scroll_out_check = gtk::CheckButton::with_label("Scroll on output");
+        let scroll_key_check = gtk::CheckButton::with_label("Scroll on keystroke");
 
-        let scroll_output_row = adw::SwitchRow::new();
-        scroll_output_row.set_title("Scroll on Output");
+        let limit_scroll_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let limit_scroll_check = gtk::CheckButton::with_label("Limit scrollback to:");
+        let scroll_lines_adj = gtk::Adjustment::new(8192.0, 100.0, 100000.0, 500.0, 1000.0, 0.0);
+        let scroll_lines_spin = gtk::SpinButton::new(Some(&scroll_lines_adj), 1.0, 0);
+        limit_scroll_box.append(&limit_scroll_check);
+        limit_scroll_box.append(&scroll_lines_spin);
 
-        let scroll_keystroke_row = adw::SwitchRow::new();
-        scroll_keystroke_row.set_title("Scroll on Keystroke");
+        scroll_box.append(&scrollbar_check);
+        scroll_box.append(&scroll_out_check);
+        scroll_box.append(&scroll_key_check);
+        scroll_box.append(&limit_scroll_box);
 
-        let scroll_unlimited_row = adw::SwitchRow::new();
-        scroll_unlimited_row.set_title("Unlimited Scrollback");
-
-        let scroll_lines_adj = gtk::Adjustment::new(5000.0, 100.0, 100000.0, 500.0, 1000.0, 0.0);
-        let scroll_lines_row = adw::SpinRow::new(Some(&scroll_lines_adj), 1.0, 0);
-        scroll_lines_row.set_title("Scrollback Lines");
-
-        scrolling_group.add(&show_scrollbar_row);
-        scrolling_group.add(&scroll_output_row);
-        scrolling_group.add(&scroll_keystroke_row);
-        scrolling_group.add(&scroll_unlimited_row);
-        scrolling_group.add(&scroll_lines_row);
-        profiles_page.add(&scrolling_group);
+        notebook.append_page(&scroll_box, Some(&gtk::Label::new(Some("Scrolling"))));
 
         // -------------------------------------------------------------------------
         // 5. Compatibility Tab
         // -------------------------------------------------------------------------
-        let compat_group = adw::PreferencesGroup::new();
-        compat_group.set_title("Compatibility and Keyboard Emulation");
+        let compat_grid = gtk::Grid::new();
+        compat_grid.set_column_spacing(12);
+        compat_grid.set_row_spacing(10);
+        compat_grid.set_margin_start(16);
+        compat_grid.set_margin_end(16);
+        compat_grid.set_margin_top(16);
+        compat_grid.set_margin_bottom(16);
 
         let erase_names = [
             "Automatic",
-            "ASCII Delete",
-            "ASCII Backspace",
-            "Delete Sequence",
+            "Control-H",
+            "ASCII DEL",
+            "Escape sequence",
             "TTY",
         ];
-        let backspace_model = gtk::StringList::new(&erase_names);
-        let backspace_row = adw::ComboRow::new();
-        backspace_row.set_title("Backspace Key Binding");
-        backspace_row.set_model(Some(&backspace_model));
 
-        let delete_model = gtk::StringList::new(&erase_names);
-        let delete_row = adw::ComboRow::new();
-        delete_row.set_title("Delete Key Binding");
-        delete_row.set_model(Some(&delete_model));
+        let bs_lbl = gtk::Label::new(Some("Backspace key generates"));
+        bs_lbl.set_halign(gtk::Align::End);
+        bs_lbl.set_xalign(1.0);
+        let bs_model = gtk::StringList::new(&erase_names);
+        let backspace_combo = gtk::DropDown::new(Some(bs_model), gtk::Expression::NONE);
+        compat_grid.attach(&bs_lbl, 0, 0, 1, 1);
+        compat_grid.attach(&backspace_combo, 1, 0, 1, 1);
 
-        let enc_names = ["UTF-8", "ISO-8859-1", "Windows-1252", "US-ASCII"];
+        let del_lbl = gtk::Label::new(Some("Delete key generates"));
+        del_lbl.set_halign(gtk::Align::End);
+        del_lbl.set_xalign(1.0);
+        let del_model = gtk::StringList::new(&erase_names);
+        let delete_combo = gtk::DropDown::new(Some(del_model), gtk::Expression::NONE);
+        compat_grid.attach(&del_lbl, 0, 1, 1, 1);
+        compat_grid.attach(&delete_combo, 1, 1, 1, 1);
+
+        let enc_lbl = gtk::Label::new(Some("Encoding"));
+        enc_lbl.set_halign(gtk::Align::End);
+        enc_lbl.set_xalign(1.0);
+        let enc_names = ["UTF-8 Unicode", "ISO-8859-1", "Windows-1252", "US-ASCII"];
         let enc_model = gtk::StringList::new(&enc_names);
-        let encoding_row = adw::ComboRow::new();
-        encoding_row.set_title("Character Encoding");
-        encoding_row.set_model(Some(&enc_model));
+        let encoding_combo = gtk::DropDown::new(Some(enc_model), gtk::Expression::NONE);
+        compat_grid.attach(&enc_lbl, 0, 2, 1, 1);
+        compat_grid.attach(&encoding_combo, 1, 2, 1, 1);
 
-        let cjk_names = ["Narrow (1 cell)", "Wide (2 cells)"];
+        let cjk_lbl = gtk::Label::new(Some("Ambiguous-width characters"));
+        cjk_lbl.set_halign(gtk::Align::End);
+        cjk_lbl.set_xalign(1.0);
+        let cjk_names = ["Narrow", "Wide"];
         let cjk_model = gtk::StringList::new(&cjk_names);
-        let cjk_row = adw::ComboRow::new();
-        cjk_row.set_title("Ambiguous-Width CJK Characters");
-        cjk_row.set_model(Some(&cjk_model));
+        let cjk_combo = gtk::DropDown::new(Some(cjk_model), gtk::Expression::NONE);
+        compat_grid.attach(&cjk_lbl, 0, 3, 1, 1);
+        compat_grid.attach(&cjk_combo, 1, 3, 1, 1);
 
-        compat_group.add(&backspace_row);
-        compat_group.add(&delete_row);
-        compat_group.add(&encoding_row);
-        compat_group.add(&cjk_row);
-        profiles_page.add(&compat_group);
+        notebook.append_page(&compat_grid, Some(&gtk::Label::new(Some("Compatibility"))));
 
         // -------------------------------------------------------------------------
         // 6. Badge Tab
         // -------------------------------------------------------------------------
-        let badge_group = adw::PreferencesGroup::new();
-        badge_group.set_title("Badge Overlay");
+        let badge_grid = gtk::Grid::new();
+        badge_grid.set_column_spacing(12);
+        badge_grid.set_row_spacing(10);
+        badge_grid.set_margin_start(16);
+        badge_grid.set_margin_end(16);
+        badge_grid.set_margin_top(16);
+        badge_grid.set_margin_bottom(16);
 
-        let badge_text_row = adw::EntryRow::new();
-        badge_text_row.set_title("Badge Text Format");
+        let badge_lbl = gtk::Label::new(Some("Badge"));
+        badge_lbl.set_halign(gtk::Align::End);
+        badge_lbl.set_xalign(1.0);
+        let badge_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let badge_entry = gtk::Entry::new();
+        badge_entry.set_hexpand(true);
+        let badge_token_btn = create_token_menu_button(&badge_entry);
+        badge_box.append(&badge_entry);
+        badge_box.append(&badge_token_btn);
+        badge_grid.attach(&badge_lbl, 0, 0, 1, 1);
+        badge_grid.attach(&badge_box, 1, 0, 1, 1);
 
+        let badge_pos_lbl = gtk::Label::new(Some("Badge position"));
+        badge_pos_lbl.set_halign(gtk::Align::End);
+        badge_pos_lbl.set_xalign(1.0);
         let badge_pos_names = ["Northwest", "Northeast", "Southwest", "Southeast"];
         let badge_pos_model = gtk::StringList::new(&badge_pos_names);
-        let badge_pos_row = adw::ComboRow::new();
-        badge_pos_row.set_title("Badge Position");
-        badge_pos_row.set_model(Some(&badge_pos_model));
+        let badge_pos_combo = gtk::DropDown::new(Some(badge_pos_model), gtk::Expression::NONE);
+        badge_grid.attach(&badge_pos_lbl, 0, 1, 1, 1);
+        badge_grid.attach(&badge_pos_combo, 1, 1, 1, 1);
 
-        let badge_color_override_row = adw::SwitchRow::new();
-        badge_color_override_row.set_title("Override Badge Color");
+        let badge_font_lbl = gtk::Label::new(Some("Custom font"));
+        badge_font_lbl.set_halign(gtk::Align::End);
+        badge_font_lbl.set_xalign(1.0);
+        let badge_font_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let badge_font_check = gtk::CheckButton::new();
+        let badge_font_btn = create_font_button();
+        badge_font_box.append(&badge_font_check);
+        badge_font_box.append(&badge_font_btn);
+        badge_grid.attach(&badge_font_lbl, 0, 2, 1, 1);
+        badge_grid.attach(&badge_font_box, 1, 2, 1, 1);
 
-        let badge_color_row = adw::EntryRow::new();
-        badge_color_row.set_title("Badge Color (Hex)");
-
-        let badge_sys_font_row = adw::SwitchRow::new();
-        badge_sys_font_row.set_title("Use System Font for Badge");
-
-        let badge_font_row = adw::EntryRow::new();
-        badge_font_row.set_title("Custom Badge Font");
-
-        badge_group.add(&badge_text_row);
-        badge_group.add(&badge_pos_row);
-        badge_group.add(&badge_color_override_row);
-        badge_group.add(&badge_color_row);
-        badge_group.add(&badge_sys_font_row);
-        badge_group.add(&badge_font_row);
-        profiles_page.add(&badge_group);
+        notebook.append_page(&badge_grid, Some(&gtk::Label::new(Some("Badge"))));
 
         // -------------------------------------------------------------------------
         // 7. Advanced Tab
         // -------------------------------------------------------------------------
-        let adv_group = adw::PreferencesGroup::new();
-        adv_group.set_title("Advanced Automation and Silence");
+        let adv_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        adv_box.set_margin_start(16);
+        adv_box.set_margin_end(16);
+        adv_box.set_margin_top(16);
+        adv_box.set_margin_bottom(16);
 
-        let silence_row = adw::SwitchRow::new();
-        silence_row.set_title("Notify on Silence");
+        // Section 1: Notify New Activity
+        let notify_title = gtk::Label::new(None);
+        notify_title.set_markup("<b>Notify New Activity</b>");
+        notify_title.set_halign(gtk::Align::Start);
+        let notify_desc = gtk::Label::new(Some(
+            "A notification can be raised when new activity occurs after a specified period of silence.",
+        ));
+        notify_desc.set_halign(gtk::Align::Start);
+        notify_desc.set_wrap(true);
+        notify_desc.set_opacity(0.7);
 
-        let silence_thresh_adj = gtk::Adjustment::new(10.0, 1.0, 3600.0, 5.0, 10.0, 0.0);
-        let silence_thresh_row = adw::SpinRow::new(Some(&silence_thresh_adj), 1.0, 0);
-        silence_thresh_row.set_title("Silence Threshold (seconds)");
+        let notify_grid = gtk::Grid::new();
+        notify_grid.set_column_spacing(12);
+        notify_grid.set_row_spacing(8);
 
-        adv_group.add(&silence_row);
-        adv_group.add(&silence_thresh_row);
-        profiles_page.add(&adv_group);
+        let silence_lbl = gtk::Label::new(Some("Enable by default"));
+        silence_lbl.set_halign(gtk::Align::End);
+        silence_lbl.set_xalign(1.0);
+        let silence_check = gtk::CheckButton::new();
+        notify_grid.attach(&silence_lbl, 0, 0, 1, 1);
+        notify_grid.attach(&silence_check, 1, 0, 1, 1);
 
-        // Add Profiles Page to window
+        let thresh_lbl = gtk::Label::new(Some("Threshold for continuous silence"));
+        thresh_lbl.set_halign(gtk::Align::End);
+        thresh_lbl.set_xalign(1.0);
+        let thresh_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let silence_thresh_adj = gtk::Adjustment::new(0.0, 0.0, 3600.0, 1.0, 5.0, 0.0);
+        let silence_thresh_spin = gtk::SpinButton::new(Some(&silence_thresh_adj), 1.0, 0);
+        thresh_box.append(&silence_thresh_spin);
+        thresh_box.append(&gtk::Label::new(Some("(seconds)")));
+        notify_grid.attach(&thresh_lbl, 0, 1, 1, 1);
+        notify_grid.attach(&thresh_box, 1, 1, 1, 1);
+
+        adv_box.append(&notify_title);
+        adv_box.append(&notify_desc);
+        adv_box.append(&notify_grid);
+
+        // Section 2: Custom Links
+        let links_title = gtk::Label::new(None);
+        links_title.set_markup("<b>Custom Links</b>");
+        links_title.set_halign(gtk::Align::Start);
+
+        let links_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let links_desc = gtk::Label::new(Some(
+            "A list of user defined links that can be clicked on in the terminal based on regular expression definitions.",
+        ));
+        links_desc.set_halign(gtk::Align::Start);
+        links_desc.set_wrap(true);
+        links_desc.set_hexpand(true);
+        links_desc.set_opacity(0.7);
+        let custom_links_btn = gtk::Button::with_label("Edit");
+        links_box.append(&links_desc);
+        links_box.append(&custom_links_btn);
+
+        adv_box.append(&links_title);
+        adv_box.append(&links_box);
+
+        // Section 3: Automatic Profile Switching
+        let auto_title = gtk::Label::new(None);
+        auto_title.set_markup("<b>Automatic Profile Switching</b>");
+        auto_title.set_halign(gtk::Align::Start);
+        let auto_desc = gtk::Label::new(Some(
+            "Profiles are automatically selected based on the values entered here. Values are entered using a hostname:directory format. Either the hostname or directory can be omitted but the colon must be present. Entries with neither hostname or directory are not permitted.",
+        ));
+        auto_desc.set_halign(gtk::Align::Start);
+        auto_desc.set_wrap(true);
+        auto_desc.set_opacity(0.7);
+
+        let auto_content_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let list_col_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        list_col_box.set_hexpand(true);
+        let match_header = gtk::Label::new(Some("Match"));
+        match_header.set_halign(gtk::Align::Start);
+        match_header.set_margin_start(4);
+        match_header.add_css_class("dim-label");
+
+        let rules_list_box = gtk::ListBox::new();
+        rules_list_box.set_selection_mode(gtk::SelectionMode::Single);
+        let rules_scrolled = gtk::ScrolledWindow::new();
+        rules_scrolled.set_min_content_height(120);
+        rules_scrolled.set_child(Some(&rules_list_box));
+        let rules_frame = gtk::Frame::new(None);
+        rules_frame.set_child(Some(&rules_scrolled));
+        list_col_box.append(&match_header);
+        list_col_box.append(&rules_frame);
+
+        let rule_btn_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let add_rule_btn = gtk::Button::with_label("Add");
+        let edit_rule_btn = gtk::Button::with_label("Edit");
+        let del_rule_btn = gtk::Button::with_label("Delete");
+        rule_btn_box.append(&add_rule_btn);
+        rule_btn_box.append(&edit_rule_btn);
+        rule_btn_box.append(&del_rule_btn);
+
+        auto_content_box.append(&list_col_box);
+        auto_content_box.append(&rule_btn_box);
+
+        adv_box.append(&auto_title);
+        adv_box.append(&auto_desc);
+        adv_box.append(&auto_content_box);
+
+        let adv_scrolled = gtk::ScrolledWindow::new();
+        adv_scrolled.set_child(Some(&adv_box));
+        notebook.append_page(&adv_scrolled, Some(&gtk::Label::new(Some("Advanced"))));
+
+        // Assemble Profile Page Container
+        let profile_page_container = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        profile_page_container.append(&profile_header_box);
+        profile_page_container.append(&notebook);
+
+        let profile_page_group = adw::PreferencesGroup::new();
+        profile_page_group.add(&profile_page_container);
+        profiles_page.add(&profile_page_group);
         window.add(&profiles_page);
 
         // -------------------------------------------------------------------------
-        // Tab switching visibility logic
-        // -------------------------------------------------------------------------
-        let groups = [
-            general_group.clone(),
-            command_group.clone(),
-            colors_group.clone(),
-            scrolling_group.clone(),
-            compat_group.clone(),
-            badge_group.clone(),
-            adv_group.clone(),
-        ];
-
-        let update_tab_visibility = {
-            let groups = groups.clone();
-            Rc::new(move |selected: u32| {
-                for (idx, grp) in groups.iter().enumerate() {
-                    grp.set_visible(idx as u32 == selected);
-                }
-            })
-        };
-
-        {
-            let utv = Rc::clone(&update_tab_visibility);
-            section_combo.connect_selected_notify(move |row| {
-                utv(row.selected());
-            });
-        }
-        update_tab_visibility(0);
-
-        // -------------------------------------------------------------------------
-        // Profile Data Binding & Live Sync
+        // State & Reactive Synchronization
         // -------------------------------------------------------------------------
         let is_populating = Rc::new(Cell::new(false));
         let selected_id = Rc::new(RefCell::new(
             current_config.borrow().default_profile_id.clone(),
         ));
 
+        // Refresh rules list helper
+        let refresh_rules_list = {
+            let rules_list_box = rules_list_box.clone();
+            let current_config = Rc::clone(&current_config);
+            let selected_id = Rc::clone(&selected_id);
+            Rc::new(move || {
+                while let Some(child) = rules_list_box.first_child() {
+                    rules_list_box.remove(&child);
+                }
+                let cfg = current_config.borrow();
+                let curr_id = selected_id.borrow().clone();
+                if let Some(prof) = cfg.get_profile(&curr_id) {
+                    for rule in &prof.automatic_switch {
+                        let text = format!("{}:{}", rule.hostname, rule.directory);
+                        let row_lbl = gtk::Label::new(Some(&text));
+                        row_lbl.set_halign(gtk::Align::Start);
+                        row_lbl.set_margin_top(4);
+                        row_lbl.set_margin_bottom(4);
+                        row_lbl.set_margin_start(8);
+                        rules_list_box.append(&row_lbl);
+                    }
+                }
+            })
+        };
+
+        // Populate fields from Profile
         let populate_fields = {
             let is_populating = Rc::clone(&is_populating);
-            let name_r = prof_name_row.clone();
-            let title_r = prof_title_row.clone();
-            let cols_r = cols_row.clone();
-            let rows_r = rows_row.clone();
-            let cell_w_r = cell_w_row.clone();
-            let cell_h_r = cell_h_row.clone();
-            let margin_r = margin_row.clone();
-            let blink_r = blink_mode_row.clone();
-            let bold_r = allow_bold_row.clone();
-            let rewrap_r = rewrap_row.clone();
-            let sys_font_r = system_font_row.clone();
-            let font_r = font_row.clone();
-            let word_r = word_chars_row.clone();
-            let cshape_r = cursor_shape_row.clone();
-            let cblink_r = cursor_blink_row.clone();
-            let bell_r = bell_row.clone();
-            let login_r = login_shell_row.clone();
-            let custom_sw_r = use_custom_cmd_row.clone();
-            let custom_cmd_r = custom_cmd_row.clone();
-            let exit_r = exit_action_row.clone();
-            let color_r = color_preset_row.clone();
-            let theme_col_r = use_theme_colors_row.clone();
-            let bg_trans_r = bg_trans_row.clone();
-            let dim_r = dim_unfocus_row.clone();
-            let bold_set_r = bold_override_row.clone();
-            let bold_hex_r = bold_color_row.clone();
-            let bold_bright_r = bold_is_bright_row.clone();
-            let cur_set_r = cursor_override_row.clone();
-            let cur_bg_r = cursor_bg_row.clone();
-            let cur_fg_r = cursor_fg_row.clone();
-            let hl_set_r = highlight_override_row.clone();
-            let hl_bg_r = highlight_bg_row.clone();
-            let hl_fg_r = highlight_fg_row.clone();
-            let scr_bar_r = show_scrollbar_row.clone();
-            let scr_out_r = scroll_output_row.clone();
-            let scr_key_r = scroll_keystroke_row.clone();
-            let scr_unl_r = scroll_unlimited_row.clone();
-            let scr_lines_r = scroll_lines_row.clone();
-            let bs_r = backspace_row.clone();
-            let del_r = delete_row.clone();
-            let enc_r = encoding_row.clone();
-            let cjk_r = cjk_row.clone();
-            let badge_txt_r = badge_text_row.clone();
-            let badge_pos_r = badge_pos_row.clone();
-            let badge_col_set_r = badge_color_override_row.clone();
-            let badge_col_r = badge_color_row.clone();
-            let badge_sys_r = badge_sys_font_row.clone();
-            let badge_font_r = badge_font_row.clone();
-            let sil_r = silence_row.clone();
-            let sil_th_r = silence_thresh_row.clone();
+            let name_r = name_entry.clone();
+            let title_r = title_entry.clone();
+            let cols_r = cols_spin.clone();
+            let rows_r = rows_spin.clone();
+            let cell_w_r = cell_w_spin.clone();
+            let cell_h_r = cell_h_spin.clone();
+            let margin_r = margin_spin.clone();
+            let blink_r = blink_combo.clone();
+            let cfont_check_r = custom_font_check.clone();
+            let font_btn_r = font_btn.clone();
+            let word_r = word_entry.clone();
+            let cshape_r = cursor_shape_combo.clone();
+            let cblink_r = cursor_blink_combo.clone();
+            let bell_r = bell_combo.clone();
+
+            let login_r = login_shell_check.clone();
+            let custom_sw_r = custom_cmd_check.clone();
+            let custom_cmd_r = custom_cmd_entry.clone();
+            let exit_r = exit_action_combo.clone();
+
+            let color_r = color_scheme_combo.clone();
+            let bg_btn_r = bg_color_btn.clone();
+            let fg_btn_r = fg_color_btn.clone();
+            let pal_btns_r = palette_buttons.clone();
+            let theme_col_r = theme_colors_check.clone();
+            let bold_bright_r = bold_bright_check.clone();
+            let trans_scale_r = trans_scale.clone();
+            let dim_scale_r = dim_scale.clone();
+
+            let bold_override_r = bold_override_check.clone();
+            let bold_color_r = bold_color_btn.clone();
+            let cur_override_r = cursor_override_check.clone();
+            let cur_bg_r = cursor_bg_btn.clone();
+            let cur_fg_r = cursor_fg_btn.clone();
+            let hl_override_r = highlight_override_check.clone();
+            let hl_bg_r = hl_bg_btn.clone();
+            let hl_fg_r = hl_fg_btn.clone();
+
+            let scr_bar_r = scrollbar_check.clone();
+            let scr_out_r = scroll_out_check.clone();
+            let scr_key_r = scroll_key_check.clone();
+            let scr_limit_r = limit_scroll_check.clone();
+            let scr_lines_r = scroll_lines_spin.clone();
+
+            let bs_r = backspace_combo.clone();
+            let del_r = delete_combo.clone();
+            let enc_r = encoding_combo.clone();
+            let cjk_r = cjk_combo.clone();
+
+            let badge_txt_r = badge_entry.clone();
+            let badge_pos_r = badge_pos_combo.clone();
+            let badge_font_check_r = badge_font_check.clone();
+            let badge_font_btn_r = badge_font_btn.clone();
+
+            let sil_r = silence_check.clone();
+            let sil_th_r = silence_thresh_spin.clone();
+            let refresh_rules = Rc::clone(&refresh_rules_list);
 
             Rc::new(move |p: &Profile| {
                 is_populating.set(true);
@@ -518,10 +1223,12 @@ impl TilixPreferencesWindow {
                 };
                 blink_r.set_selected(blink_idx);
 
-                bold_r.set_active(p.allow_bold);
-                rewrap_r.set_active(p.rewrap_on_resize);
-                sys_font_r.set_active(p.use_system_font);
-                font_r.set_text(p.font.as_deref().unwrap_or("Monospace 11"));
+                cfont_check_r.set_active(!p.use_system_font);
+                font_btn_r.set_sensitive(!p.use_system_font);
+                let font_name = p.font.as_deref().unwrap_or("Monospace 10");
+                let fdesc = gtk::pango::FontDescription::from_string(font_name);
+                font_btn_r.set_font_desc(&fdesc);
+
                 word_r.set_text(&p.select_by_word_chars);
 
                 let shape_idx = match p.cursor_shape {
@@ -549,6 +1256,7 @@ impl TilixPreferencesWindow {
                 login_r.set_active(p.login_shell);
                 custom_sw_r.set_active(p.use_custom_command);
                 custom_cmd_r.set_text(&p.custom_command);
+                custom_cmd_r.set_sensitive(p.use_custom_command);
 
                 let exit_idx = match p.exit_action {
                     ExitActionPreference::Close => 0,
@@ -557,75 +1265,74 @@ impl TilixPreferencesWindow {
                 };
                 exit_r.set_selected(exit_idx);
 
-                let color_idx = match p.color_scheme.name.as_str() {
+                let scheme_idx = match p.color_scheme.name.as_str() {
                     "Tilix Light" => 1,
                     "Solarized Dark" => 2,
                     "Monokai" => 3,
-                    _ => 0,
+                    "Tilix Dark" => 0,
+                    _ => 4,
                 };
-                color_r.set_selected(color_idx);
+                color_r.set_selected(scheme_idx);
+
+                bg_btn_r.set_rgba(&rgb_to_rgba(&p.color_scheme.background));
+                fg_btn_r.set_rgba(&rgb_to_rgba(&p.color_scheme.foreground));
+                for (btn, col) in pal_btns_r.iter().zip(p.color_scheme.palette.iter()) {
+                    btn.set_rgba(&rgb_to_rgba(col));
+                }
+
                 theme_col_r.set_active(p.use_theme_colors);
-                bg_trans_r.set_value(p.background_transparency_percent as f64);
-                dim_r.set_value(p.dim_transparency_percent as f64);
-
-                bold_set_r.set_active(p.bold_color_set);
-                bold_hex_r.set_text(
-                    &p.bold_color
-                        .as_ref()
-                        .map(|c| c.to_hex())
-                        .unwrap_or_default(),
-                );
                 bold_bright_r.set_active(p.bold_is_bright);
+                trans_scale_r.set_value(p.background_transparency_percent as f64);
+                dim_scale_r.set_value(p.dim_transparency_percent as f64);
 
-                cur_set_r.set_active(p.cursor_colors_set);
-                cur_bg_r.set_text(
-                    &p.cursor_background_color
-                        .as_ref()
-                        .map(|c| c.to_hex())
-                        .unwrap_or_default(),
-                );
-                cur_fg_r.set_text(
-                    &p.cursor_foreground_color
-                        .as_ref()
-                        .map(|c| c.to_hex())
-                        .unwrap_or_default(),
-                );
+                bold_override_r.set_active(p.bold_color_set);
+                bold_color_r.set_sensitive(p.bold_color_set);
+                if let Some(ref c) = p.bold_color {
+                    bold_color_r.set_rgba(&rgb_to_rgba(c));
+                }
 
-                hl_set_r.set_active(p.highlight_colors_set);
-                hl_bg_r.set_text(
-                    &p.highlight_background_color
-                        .as_ref()
-                        .map(|c| c.to_hex())
-                        .unwrap_or_default(),
-                );
-                hl_fg_r.set_text(
-                    &p.highlight_foreground_color
-                        .as_ref()
-                        .map(|c| c.to_hex())
-                        .unwrap_or_default(),
-                );
+                cur_override_r.set_active(p.cursor_colors_set);
+                cur_bg_r.set_sensitive(p.cursor_colors_set);
+                cur_fg_r.set_sensitive(p.cursor_colors_set);
+                if let Some(ref c) = p.cursor_background_color {
+                    cur_bg_r.set_rgba(&rgb_to_rgba(c));
+                }
+                if let Some(ref c) = p.cursor_foreground_color {
+                    cur_fg_r.set_rgba(&rgb_to_rgba(c));
+                }
+
+                hl_override_r.set_active(p.highlight_colors_set);
+                hl_bg_r.set_sensitive(p.highlight_colors_set);
+                hl_fg_r.set_sensitive(p.highlight_colors_set);
+                if let Some(ref c) = p.highlight_background_color {
+                    hl_bg_r.set_rgba(&rgb_to_rgba(c));
+                }
+                if let Some(ref c) = p.highlight_foreground_color {
+                    hl_fg_r.set_rgba(&rgb_to_rgba(c));
+                }
 
                 scr_bar_r.set_active(p.show_scrollbar);
                 scr_out_r.set_active(p.scroll_on_output);
                 scr_key_r.set_active(p.scroll_on_keystroke);
-                scr_unl_r.set_active(p.scrollback_unlimited);
-                scr_lines_r.set_value(p.scrollback_lines.unwrap_or(5000) as f64);
+                scr_limit_r.set_active(!p.scrollback_unlimited);
+                scr_lines_r.set_sensitive(!p.scrollback_unlimited);
+                scr_lines_r.set_value(p.scrollback_lines.unwrap_or(8192) as f64);
 
                 let bs_idx = match p.backspace_binding {
-                    EraseBindingPreference::Auto => 0,
-                    EraseBindingPreference::AsciiDelete => 1,
-                    EraseBindingPreference::AsciiBackspace => 2,
+                    EraseBindingPreference::AsciiBackspace => 1,
+                    EraseBindingPreference::AsciiDelete => 2,
                     EraseBindingPreference::DeleteSequence => 3,
                     EraseBindingPreference::Tty => 4,
+                    _ => 0,
                 };
                 bs_r.set_selected(bs_idx);
 
                 let del_idx = match p.delete_binding {
-                    EraseBindingPreference::Auto => 0,
-                    EraseBindingPreference::AsciiDelete => 1,
-                    EraseBindingPreference::AsciiBackspace => 2,
+                    EraseBindingPreference::AsciiBackspace => 1,
+                    EraseBindingPreference::AsciiDelete => 2,
                     EraseBindingPreference::DeleteSequence => 3,
                     EraseBindingPreference::Tty => 4,
+                    _ => 0,
                 };
                 del_r.set_selected(del_idx);
 
@@ -638,31 +1345,30 @@ impl TilixPreferencesWindow {
                 enc_r.set_selected(enc_idx);
 
                 let cjk_idx = match p.cjk_utf8_ambiguous_width {
-                    CjkWidthPreference::Narrow => 0,
                     CjkWidthPreference::Wide => 1,
+                    _ => 0,
                 };
                 cjk_r.set_selected(cjk_idx);
 
                 badge_txt_r.set_text(&p.badge_text);
                 let bpos_idx = match p.badge_position {
                     BadgePosition::Northwest => 0,
-                    BadgePosition::Northeast => 1,
                     BadgePosition::Southwest => 2,
                     BadgePosition::Southeast => 3,
+                    _ => 1,
                 };
                 badge_pos_r.set_selected(bpos_idx);
-                badge_col_set_r.set_active(p.badge_color_set);
-                badge_col_r.set_text(
-                    &p.badge_color
-                        .as_ref()
-                        .map(|c| c.to_hex())
-                        .unwrap_or_default(),
-                );
-                badge_sys_r.set_active(p.badge_use_system_font);
-                badge_font_r.set_text(p.badge_font.as_deref().unwrap_or(""));
+
+                badge_font_check_r.set_active(!p.badge_use_system_font);
+                badge_font_btn_r.set_sensitive(!p.badge_use_system_font);
+                let b_font_name = p.badge_font.as_deref().unwrap_or("Monospace 12");
+                let b_desc = gtk::pango::FontDescription::from_string(b_font_name);
+                badge_font_btn_r.set_font_desc(&b_desc);
 
                 sil_r.set_active(p.notify_silence_enabled);
                 sil_th_r.set_value(p.notify_silence_threshold as f64);
+
+                refresh_rules();
 
                 is_populating.set(false);
             })
@@ -671,9 +1377,10 @@ impl TilixPreferencesWindow {
         // Refresh profile selector dropdown list
         let refresh_profiles_dropdown = {
             let config_rc = Rc::clone(&current_config);
-            let profile_combo = profile_combo.clone();
+            let profile_dropdown = profile_dropdown.clone();
             let selected_id = Rc::clone(&selected_id);
             let del_btn = del_btn.clone();
+            let set_def_btn = set_def_btn.clone();
             let populate_fields = Rc::clone(&populate_fields);
             let is_populating = Rc::clone(&is_populating);
 
@@ -693,7 +1400,7 @@ impl TilixPreferencesWindow {
                     .collect();
                 let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
                 let str_list = gtk::StringList::new(&name_refs);
-                profile_combo.set_model(Some(&str_list));
+                profile_dropdown.set_model(Some(&str_list));
 
                 del_btn.set_sensitive(cfg.profiles.len() > 1);
 
@@ -703,11 +1410,16 @@ impl TilixPreferencesWindow {
                     .iter()
                     .position(|p| p.id == curr_id)
                     .unwrap_or(0);
-                profile_combo.set_selected(selected_idx as u32);
+                profile_dropdown.set_selected(selected_idx as u32);
 
-                if let Some(prof) = cfg.profiles.get(selected_idx) {
+                set_def_btn.set_sensitive(curr_id != cfg.default_profile_id);
+
+                let prof_opt = cfg.profiles.get(selected_idx).cloned();
+                drop(cfg);
+
+                if let Some(prof) = prof_opt {
                     *selected_id.borrow_mut() = prof.id.clone();
-                    populate_fields(prof);
+                    populate_fields(&prof);
                 }
                 is_populating.set(false);
             })
@@ -715,65 +1427,65 @@ impl TilixPreferencesWindow {
 
         refresh_profiles_dropdown();
 
-        // -------------------------------------------------------------------------
         // Save current fields back to active profile
-        // -------------------------------------------------------------------------
         let save_active_profile = {
             let config_rc = Rc::clone(&current_config);
             let selected_id = Rc::clone(&selected_id);
             let is_populating = Rc::clone(&is_populating);
             let on_change = Rc::clone(&on_change);
 
-            let name_r = prof_name_row.clone();
-            let title_r = prof_title_row.clone();
-            let cols_r = cols_row.clone();
-            let rows_r = rows_row.clone();
-            let cell_w_r = cell_w_row.clone();
-            let cell_h_r = cell_h_row.clone();
-            let margin_r = margin_row.clone();
-            let blink_r = blink_mode_row.clone();
-            let bold_r = allow_bold_row.clone();
-            let rewrap_r = rewrap_row.clone();
-            let sys_font_r = system_font_row.clone();
-            let font_r = font_row.clone();
-            let word_r = word_chars_row.clone();
-            let cshape_r = cursor_shape_row.clone();
-            let cblink_r = cursor_blink_row.clone();
-            let bell_r = bell_row.clone();
-            let login_r = login_shell_row.clone();
-            let custom_sw_r = use_custom_cmd_row.clone();
-            let custom_cmd_r = custom_cmd_row.clone();
-            let exit_r = exit_action_row.clone();
-            let color_r = color_preset_row.clone();
-            let theme_col_r = use_theme_colors_row.clone();
-            let bg_trans_r = bg_trans_row.clone();
-            let dim_r = dim_unfocus_row.clone();
-            let bold_set_r = bold_override_row.clone();
-            let bold_hex_r = bold_color_row.clone();
-            let bold_bright_r = bold_is_bright_row.clone();
-            let cur_set_r = cursor_override_row.clone();
-            let cur_bg_r = cursor_bg_row.clone();
-            let cur_fg_r = cursor_fg_row.clone();
-            let hl_set_r = highlight_override_row.clone();
-            let hl_bg_r = highlight_bg_row.clone();
-            let hl_fg_r = highlight_fg_row.clone();
-            let scr_bar_r = show_scrollbar_row.clone();
-            let scr_out_r = scroll_output_row.clone();
-            let scr_key_r = scroll_keystroke_row.clone();
-            let scr_unl_r = scroll_unlimited_row.clone();
-            let scr_lines_r = scroll_lines_row.clone();
-            let bs_r = backspace_row.clone();
-            let del_r = delete_row.clone();
-            let enc_r = encoding_row.clone();
-            let cjk_r = cjk_row.clone();
-            let badge_txt_r = badge_text_row.clone();
-            let badge_pos_r = badge_pos_row.clone();
-            let badge_col_set_r = badge_color_override_row.clone();
-            let badge_col_r = badge_color_row.clone();
-            let badge_sys_r = badge_sys_font_row.clone();
-            let badge_font_r = badge_font_row.clone();
-            let sil_r = silence_row.clone();
-            let sil_th_r = silence_thresh_row.clone();
+            let name_r = name_entry.clone();
+            let title_r = title_entry.clone();
+            let cols_r = cols_spin.clone();
+            let rows_r = rows_spin.clone();
+            let cell_w_r = cell_w_spin.clone();
+            let cell_h_r = cell_h_spin.clone();
+            let margin_r = margin_spin.clone();
+            let blink_r = blink_combo.clone();
+            let cfont_check_r = custom_font_check.clone();
+            let font_btn_r = font_btn.clone();
+            let word_r = word_entry.clone();
+            let cshape_r = cursor_shape_combo.clone();
+            let cblink_r = cursor_blink_combo.clone();
+            let bell_r = bell_combo.clone();
+
+            let login_r = login_shell_check.clone();
+            let custom_sw_r = custom_cmd_check.clone();
+            let custom_cmd_r = custom_cmd_entry.clone();
+            let exit_r = exit_action_combo.clone();
+
+            let theme_col_r = theme_colors_check.clone();
+            let bold_bright_r = bold_bright_check.clone();
+            let trans_scale_r = trans_scale.clone();
+            let dim_scale_r = dim_scale.clone();
+
+            let bold_override_r = bold_override_check.clone();
+            let bold_color_r = bold_color_btn.clone();
+            let cur_override_r = cursor_override_check.clone();
+            let cur_bg_r = cursor_bg_btn.clone();
+            let cur_fg_r = cursor_fg_btn.clone();
+            let hl_override_r = highlight_override_check.clone();
+            let hl_bg_r = hl_bg_btn.clone();
+            let hl_fg_r = hl_fg_btn.clone();
+
+            let scr_bar_r = scrollbar_check.clone();
+            let scr_out_r = scroll_out_check.clone();
+            let scr_key_r = scroll_key_check.clone();
+            let scr_limit_r = limit_scroll_check.clone();
+            let scr_lines_r = scroll_lines_spin.clone();
+
+            let bs_r = backspace_combo.clone();
+            let del_r = delete_combo.clone();
+            let enc_r = encoding_combo.clone();
+            let cjk_r = cjk_combo.clone();
+
+            let badge_txt_r = badge_entry.clone();
+            let badge_pos_r = badge_pos_combo.clone();
+            let badge_font_check_r = badge_font_check.clone();
+            let badge_font_btn_r = badge_font_btn.clone();
+
+            let sil_r = silence_check.clone();
+            let sil_th_r = silence_thresh_spin.clone();
 
             Rc::new(move || {
                 if is_populating.get() {
@@ -799,15 +1511,10 @@ impl TilixPreferencesWindow {
                     _ => TextBlinkModePreference::Never,
                 };
 
-                prof.allow_bold = bold_r.is_active();
-                prof.rewrap_on_resize = rewrap_r.is_active();
-                prof.use_system_font = sys_font_r.is_active();
-                let f_text = font_r.text().to_string();
-                prof.font = if f_text.trim().is_empty() {
-                    Some("Monospace 11".into())
-                } else {
-                    Some(f_text)
-                };
+                prof.use_system_font = !cfont_check_r.is_active();
+                if let Some(desc) = font_btn_r.font_desc() {
+                    prof.font = Some(desc.to_string());
+                }
                 prof.select_by_word_chars = word_r.text().to_string();
 
                 prof.cursor_shape = match cshape_r.selected() {
@@ -839,45 +1546,39 @@ impl TilixPreferencesWindow {
                     _ => ExitActionPreference::Close,
                 };
 
-                prof.color_scheme = match color_r.selected() {
-                    1 => ColorScheme::tilix_light(),
-                    2 => ColorScheme::solarized_dark(),
-                    3 => ColorScheme::monokai(),
-                    _ => ColorScheme::tilix_dark(),
-                };
                 prof.use_theme_colors = theme_col_r.is_active();
-                prof.background_transparency_percent = bg_trans_r.value() as u32;
-                prof.dim_transparency_percent = dim_r.value() as u32;
-
-                prof.bold_color_set = bold_set_r.is_active();
-                prof.bold_color = RgbColor::from_hex(&bold_hex_r.text()).ok();
                 prof.bold_is_bright = bold_bright_r.is_active();
+                prof.background_transparency_percent = trans_scale_r.value().round() as u32;
+                prof.dim_transparency_percent = dim_scale_r.value().round() as u32;
 
-                prof.cursor_colors_set = cur_set_r.is_active();
-                prof.cursor_background_color = RgbColor::from_hex(&cur_bg_r.text()).ok();
-                prof.cursor_foreground_color = RgbColor::from_hex(&cur_fg_r.text()).ok();
+                prof.bold_color_set = bold_override_r.is_active();
+                prof.bold_color = Some(rgba_to_rgb(&bold_color_r.rgba()));
 
-                prof.highlight_colors_set = hl_set_r.is_active();
-                prof.highlight_background_color = RgbColor::from_hex(&hl_bg_r.text()).ok();
-                prof.highlight_foreground_color = RgbColor::from_hex(&hl_fg_r.text()).ok();
+                prof.cursor_colors_set = cur_override_r.is_active();
+                prof.cursor_background_color = Some(rgba_to_rgb(&cur_bg_r.rgba()));
+                prof.cursor_foreground_color = Some(rgba_to_rgb(&cur_fg_r.rgba()));
+
+                prof.highlight_colors_set = hl_override_r.is_active();
+                prof.highlight_background_color = Some(rgba_to_rgb(&hl_bg_r.rgba()));
+                prof.highlight_foreground_color = Some(rgba_to_rgb(&hl_fg_r.rgba()));
 
                 prof.show_scrollbar = scr_bar_r.is_active();
                 prof.scroll_on_output = scr_out_r.is_active();
                 prof.scroll_on_keystroke = scr_key_r.is_active();
-                prof.scrollback_unlimited = scr_unl_r.is_active();
+                prof.scrollback_unlimited = !scr_limit_r.is_active();
                 prof.scrollback_lines = Some(scr_lines_r.value() as i64);
 
                 prof.backspace_binding = match bs_r.selected() {
-                    1 => EraseBindingPreference::AsciiDelete,
-                    2 => EraseBindingPreference::AsciiBackspace,
+                    1 => EraseBindingPreference::AsciiBackspace,
+                    2 => EraseBindingPreference::AsciiDelete,
                     3 => EraseBindingPreference::DeleteSequence,
                     4 => EraseBindingPreference::Tty,
                     _ => EraseBindingPreference::Auto,
                 };
 
                 prof.delete_binding = match del_r.selected() {
-                    1 => EraseBindingPreference::AsciiDelete,
-                    2 => EraseBindingPreference::AsciiBackspace,
+                    1 => EraseBindingPreference::AsciiBackspace,
+                    2 => EraseBindingPreference::AsciiDelete,
                     3 => EraseBindingPreference::DeleteSequence,
                     4 => EraseBindingPreference::Tty,
                     _ => EraseBindingPreference::Auto,
@@ -902,15 +1603,10 @@ impl TilixPreferencesWindow {
                     3 => BadgePosition::Southeast,
                     _ => BadgePosition::Northeast,
                 };
-                prof.badge_color_set = badge_col_set_r.is_active();
-                prof.badge_color = RgbColor::from_hex(&badge_col_r.text()).ok();
-                prof.badge_use_system_font = badge_sys_r.is_active();
-                let b_font = badge_font_r.text().to_string();
-                prof.badge_font = if b_font.trim().is_empty() {
-                    None
-                } else {
-                    Some(b_font)
-                };
+                prof.badge_use_system_font = !badge_font_check_r.is_active();
+                if let Some(desc) = badge_font_btn_r.font_desc() {
+                    prof.badge_font = Some(desc.to_string());
+                }
 
                 prof.notify_silence_enabled = sil_r.is_active();
                 prof.notify_silence_threshold = sil_th_r.value() as u32;
@@ -926,15 +1622,16 @@ impl TilixPreferencesWindow {
             })
         };
 
-        // Wire profile selector combo selection
+        // Wire profile selector dropdown selection
         {
             let config_rc = Rc::clone(&current_config);
             let selected_id = Rc::clone(&selected_id);
             let populate_fields = Rc::clone(&populate_fields);
             let is_populating = Rc::clone(&is_populating);
             let on_change = Rc::clone(&on_change);
+            let set_def_btn = set_def_btn.clone();
 
-            profile_combo.connect_selected_notify(move |combo| {
+            profile_dropdown.connect_selected_notify(move |combo| {
                 if is_populating.get() {
                     return;
                 }
@@ -943,13 +1640,346 @@ impl TilixPreferencesWindow {
                 if let Some(prof) = cfg.profiles.get(idx) {
                     *selected_id.borrow_mut() = prof.id.clone();
                     populate_fields(prof);
+                    set_def_btn.set_sensitive(prof.id != cfg.default_profile_id);
                     crate::ui::window::apply_profile_to_all_sessions(prof);
                     on_change(prof);
                 }
             });
         }
 
-        // Connect changes on all row widgets
+        // Palette Live Edit -> Custom Scheme helper
+        let update_palette_color = {
+            let current_config = Rc::clone(&current_config);
+            let selected_id = Rc::clone(&selected_id);
+            let is_populating = Rc::clone(&is_populating);
+            let color_scheme_combo = color_scheme_combo.clone();
+            let on_change = Rc::clone(&on_change);
+
+            Rc::new(move |update_fn: Box<dyn Fn(&mut ColorScheme)>| {
+                if is_populating.get() {
+                    return;
+                }
+                let id = selected_id.borrow().clone();
+                let mut cfg = current_config.borrow_mut();
+                let Some(prof) = cfg.get_profile_mut(&id) else { return; };
+
+                update_fn(&mut prof.color_scheme);
+                prof.color_scheme.name = "Custom".to_string();
+
+                is_populating.set(true);
+                color_scheme_combo.set_selected(4);
+                is_populating.set(false);
+
+                let updated = prof.clone();
+                if updated.id == cfg.default_profile_id {
+                    cfg.default_profile = updated.clone();
+                }
+                let _ = cfg.save();
+                crate::ui::window::apply_profile_to_all_sessions(&updated);
+                on_change(&updated);
+            })
+        };
+
+        // Wire 18 palette color buttons
+        {
+            let upc = Rc::clone(&update_palette_color);
+            bg_color_btn.connect_rgba_notify(move |b| {
+                let col = rgba_to_rgb(&b.rgba());
+                upc(Box::new(move |s| s.background = col.clone()));
+            });
+        }
+        {
+            let upc = Rc::clone(&update_palette_color);
+            fg_color_btn.connect_rgba_notify(move |b| {
+                let col = rgba_to_rgb(&b.rgba());
+                upc(Box::new(move |s| s.foreground = col.clone()));
+            });
+        }
+        for (i, btn) in palette_buttons.iter().enumerate() {
+            let upc = Rc::clone(&update_palette_color);
+            btn.connect_rgba_notify(move |b| {
+                let col = rgba_to_rgb(&b.rgba());
+                upc(Box::new(move |s| s.palette[i] = col.clone()));
+            });
+        }
+
+        // Color scheme dropdown selection
+        {
+            let current_config = Rc::clone(&current_config);
+            let selected_id = Rc::clone(&selected_id);
+            let is_populating = Rc::clone(&is_populating);
+            let on_change = Rc::clone(&on_change);
+            let bg_btn = bg_color_btn.clone();
+            let fg_btn = fg_color_btn.clone();
+            let pal_btns = palette_buttons.clone();
+
+            color_scheme_combo.connect_selected_notify(move |combo| {
+                if is_populating.get() {
+                    return;
+                }
+                let idx = combo.selected();
+                if idx >= 4 {
+                    return;
+                }
+                let scheme = match idx {
+                    1 => ColorScheme::tilix_light(),
+                    2 => ColorScheme::solarized_dark(),
+                    3 => ColorScheme::monokai(),
+                    _ => ColorScheme::tilix_dark(),
+                };
+
+                let id = selected_id.borrow().clone();
+                let mut cfg = current_config.borrow_mut();
+                let Some(prof) = cfg.get_profile_mut(&id) else { return; };
+                prof.color_scheme = scheme.clone();
+
+                is_populating.set(true);
+                bg_btn.set_rgba(&rgb_to_rgba(&scheme.background));
+                fg_btn.set_rgba(&rgb_to_rgba(&scheme.foreground));
+                for (btn, col) in pal_btns.iter().zip(scheme.palette.iter()) {
+                    btn.set_rgba(&rgb_to_rgba(col));
+                }
+                is_populating.set(false);
+
+                let updated = prof.clone();
+                if updated.id == cfg.default_profile_id {
+                    cfg.default_profile = updated.clone();
+                }
+                let _ = cfg.save();
+                crate::ui::window::apply_profile_to_all_sessions(&updated);
+                on_change(&updated);
+            });
+        }
+
+        // Export Color Scheme Button
+        {
+            let current_config = Rc::clone(&current_config);
+            let selected_id = Rc::clone(&selected_id);
+            export_btn.connect_clicked(move |_| {
+                let cfg = current_config.borrow();
+                let id = selected_id.borrow().clone();
+                if let Some(prof) = cfg.get_profile(&id) {
+                    if let Ok(json) = serde_json::to_string_pretty(&prof.color_scheme) {
+                        let path = glib::user_config_dir().join("tilix").join("schemes");
+                        let _ = std::fs::create_dir_all(&path);
+                        let file_path = path.join(format!("{}.json", prof.color_scheme.name.to_lowercase().replace(' ', "-")));
+                        let _ = std::fs::write(&file_path, json);
+                    }
+                }
+            });
+        }
+
+        // Reset buttons in General tab
+        {
+            let cols = cols_spin.clone();
+            let rows = rows_spin.clone();
+            let s = Rc::clone(&save_active_profile);
+            size_reset_btn.connect_clicked(move |_| {
+                cols.set_value(80.0);
+                rows.set_value(24.0);
+                s();
+            });
+        }
+        {
+            let cell_w = cell_w_spin.clone();
+            let cell_h = cell_h_spin.clone();
+            let s = Rc::clone(&save_active_profile);
+            spacing_reset_btn.connect_clicked(move |_| {
+                cell_w.set_value(1.0);
+                cell_h.set_value(1.0);
+                s();
+            });
+        }
+
+        // Sensitivity linkages
+        {
+            let cmd_entry = custom_cmd_entry.clone();
+            let s = Rc::clone(&save_active_profile);
+            custom_cmd_check.connect_toggled(move |cb| {
+                cmd_entry.set_sensitive(cb.is_active());
+                s();
+            });
+        }
+        {
+            let fbtn = font_btn.clone();
+            let s = Rc::clone(&save_active_profile);
+            custom_font_check.connect_toggled(move |cb| {
+                fbtn.set_sensitive(cb.is_active());
+                s();
+            });
+        }
+        {
+            let bfbtn = badge_font_btn.clone();
+            let s = Rc::clone(&save_active_profile);
+            badge_font_check.connect_toggled(move |cb| {
+                bfbtn.set_sensitive(cb.is_active());
+                s();
+            });
+        }
+        {
+            let lspin = scroll_lines_spin.clone();
+            let s = Rc::clone(&save_active_profile);
+            limit_scroll_check.connect_toggled(move |cb| {
+                lspin.set_sensitive(cb.is_active());
+                s();
+            });
+        }
+        {
+            let btn = bold_color_btn.clone();
+            let s = Rc::clone(&save_active_profile);
+            bold_override_check.connect_toggled(move |cb| {
+                btn.set_sensitive(cb.is_active());
+                s();
+            });
+        }
+        {
+            let bg = cursor_bg_btn.clone();
+            let fg = cursor_fg_btn.clone();
+            let s = Rc::clone(&save_active_profile);
+            cursor_override_check.connect_toggled(move |cb| {
+                bg.set_sensitive(cb.is_active());
+                fg.set_sensitive(cb.is_active());
+                s();
+            });
+        }
+        {
+            let bg = hl_bg_btn.clone();
+            let fg = hl_fg_btn.clone();
+            let s = Rc::clone(&save_active_profile);
+            highlight_override_check.connect_toggled(move |cb| {
+                bg.set_sensitive(cb.is_active());
+                fg.set_sensitive(cb.is_active());
+                s();
+            });
+        }
+
+        // Automatic Profile Switching actions
+        {
+            let win_weak = window.downgrade();
+            let current_config = Rc::clone(&current_config);
+            let selected_id = Rc::clone(&selected_id);
+            let refresh_rules = Rc::clone(&refresh_rules_list);
+            let on_change = Rc::clone(&on_change);
+
+            add_rule_btn.connect_clicked(move |_| {
+                let Some(win) = win_weak.upgrade() else { return; };
+                let cfg_rc = Rc::clone(&current_config);
+                let sel_rc = Rc::clone(&selected_id);
+                let rr = Rc::clone(&refresh_rules);
+                let oc = Rc::clone(&on_change);
+                let curr_id = sel_rc.borrow().clone();
+
+                show_auto_switch_rule_dialog(&win, None, curr_id.clone(), move |new_rule| {
+                    let mut cfg = cfg_rc.borrow_mut();
+                    if let Some(prof) = cfg.get_profile_mut(&curr_id) {
+                        prof.automatic_switch.push(new_rule);
+                        let updated = prof.clone();
+                        let _ = cfg.save();
+                        rr();
+                        crate::ui::window::apply_profile_to_all_sessions(&updated);
+                        oc(&updated);
+                    }
+                });
+            });
+        }
+        {
+            let win_weak = window.downgrade();
+            let current_config = Rc::clone(&current_config);
+            let selected_id = Rc::clone(&selected_id);
+            let rules_list = rules_list_box.clone();
+            let refresh_rules = Rc::clone(&refresh_rules_list);
+            let on_change = Rc::clone(&on_change);
+
+            edit_rule_btn.connect_clicked(move |_| {
+                let Some(row) = rules_list.selected_row() else { return; };
+                let idx = row.index() as usize;
+                let Some(win) = win_weak.upgrade() else { return; };
+
+                let cfg_rc = Rc::clone(&current_config);
+                let sel_rc = Rc::clone(&selected_id);
+                let rr = Rc::clone(&refresh_rules);
+                let oc = Rc::clone(&on_change);
+                let curr_id = sel_rc.borrow().clone();
+
+                let rule_opt = cfg_rc
+                    .borrow()
+                    .get_profile(&curr_id)
+                    .and_then(|p| p.automatic_switch.get(idx).cloned());
+
+                if let Some(existing) = rule_opt {
+                    show_auto_switch_rule_dialog(&win, Some(&existing), curr_id.clone(), move |edited| {
+                        let mut cfg = cfg_rc.borrow_mut();
+                        if let Some(prof) = cfg.get_profile_mut(&curr_id) {
+                            if idx < prof.automatic_switch.len() {
+                                prof.automatic_switch[idx] = edited;
+                                let updated = prof.clone();
+                                let _ = cfg.save();
+                                rr();
+                                crate::ui::window::apply_profile_to_all_sessions(&updated);
+                                oc(&updated);
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        {
+            let current_config = Rc::clone(&current_config);
+            let selected_id = Rc::clone(&selected_id);
+            let rules_list = rules_list_box.clone();
+            let refresh_rules = Rc::clone(&refresh_rules_list);
+            let on_change = Rc::clone(&on_change);
+
+            del_rule_btn.connect_clicked(move |_| {
+                let Some(row) = rules_list.selected_row() else { return; };
+                let idx = row.index() as usize;
+                let curr_id = selected_id.borrow().clone();
+                let mut cfg = current_config.borrow_mut();
+                if let Some(prof) = cfg.get_profile_mut(&curr_id) {
+                    if idx < prof.automatic_switch.len() {
+                        prof.automatic_switch.remove(idx);
+                        let updated = prof.clone();
+                        let _ = cfg.save();
+                        refresh_rules();
+                        crate::ui::window::apply_profile_to_all_sessions(&updated);
+                        on_change(&updated);
+                    }
+                }
+            });
+        }
+
+        // Custom Links Button Dialog
+        {
+            let win_weak = window.downgrade();
+            let current_config = Rc::clone(&current_config);
+            let selected_id = Rc::clone(&selected_id);
+            let on_change = Rc::clone(&on_change);
+
+            custom_links_btn.connect_clicked(move |_| {
+                let Some(win) = win_weak.upgrade() else { return; };
+                let curr_id = selected_id.borrow().clone();
+                let links = current_config
+                    .borrow()
+                    .get_profile(&curr_id)
+                    .map(|p| p.custom_hyperlinks.clone())
+                    .unwrap_or_default();
+
+                let cfg_rc = Rc::clone(&current_config);
+                let oc = Rc::clone(&on_change);
+                show_custom_links_dialog(&win, links, move |new_links| {
+                    let mut cfg = cfg_rc.borrow_mut();
+                    if let Some(prof) = cfg.get_profile_mut(&curr_id) {
+                        prof.custom_hyperlinks = new_links;
+                        let updated = prof.clone();
+                        let _ = cfg.save();
+                        crate::ui::window::apply_profile_to_all_sessions(&updated);
+                        oc(&updated);
+                    }
+                });
+            });
+        }
+
+        // Connect changes on all widgets to save_active_profile
         macro_rules! connect_sync {
             ($widget:expr, notify_active) => {{
                 let s = Rc::clone(&save_active_profile);
@@ -963,64 +1993,64 @@ impl TilixPreferencesWindow {
                 let s = Rc::clone(&save_active_profile);
                 $widget.connect_changed(move |_| s());
             }};
+            ($widget:expr, value_changed) => {{
+                let s = Rc::clone(&save_active_profile);
+                $widget.connect_value_changed(move |_| s());
+            }};
+            ($widget:expr, notify_rgba) => {{
+                let s = Rc::clone(&save_active_profile);
+                $widget.connect_rgba_notify(move |_| s());
+            }};
+            ($widget:expr, notify_font) => {{
+                let s = Rc::clone(&save_active_profile);
+                $widget.connect_font_desc_notify(move |_| s());
+            }};
         }
 
-        connect_sync!(prof_name_row, changed_entry);
-        connect_sync!(prof_title_row, changed_entry);
-        connect_sync!(cols_row, changed_entry);
-        connect_sync!(rows_row, changed_entry);
-        connect_sync!(cell_w_row, changed_entry);
-        connect_sync!(cell_h_row, changed_entry);
-        connect_sync!(margin_row, changed_entry);
-        connect_sync!(blink_mode_row, notify_selected);
-        connect_sync!(allow_bold_row, notify_active);
-        connect_sync!(rewrap_row, notify_active);
-        connect_sync!(system_font_row, notify_active);
-        connect_sync!(font_row, changed_entry);
-        connect_sync!(word_chars_row, changed_entry);
-        connect_sync!(cursor_shape_row, notify_selected);
-        connect_sync!(cursor_blink_row, notify_selected);
-        connect_sync!(bell_row, notify_selected);
+        connect_sync!(name_entry, changed_entry);
+        connect_sync!(title_entry, changed_entry);
+        connect_sync!(cols_spin, value_changed);
+        connect_sync!(rows_spin, value_changed);
+        connect_sync!(cell_w_spin, value_changed);
+        connect_sync!(cell_h_spin, value_changed);
+        connect_sync!(margin_spin, value_changed);
+        connect_sync!(blink_combo, notify_selected);
+        connect_sync!(font_btn, notify_font);
+        connect_sync!(word_entry, changed_entry);
+        connect_sync!(cursor_shape_combo, notify_selected);
+        connect_sync!(cursor_blink_combo, notify_selected);
+        connect_sync!(bell_combo, notify_selected);
 
-        connect_sync!(login_shell_row, notify_active);
-        connect_sync!(use_custom_cmd_row, notify_active);
-        connect_sync!(custom_cmd_row, changed_entry);
-        connect_sync!(exit_action_row, notify_selected);
+        connect_sync!(login_shell_check, notify_active);
+        connect_sync!(custom_cmd_entry, changed_entry);
+        connect_sync!(exit_action_combo, notify_selected);
 
-        connect_sync!(color_preset_row, notify_selected);
-        connect_sync!(use_theme_colors_row, notify_active);
-        connect_sync!(bg_trans_row, changed_entry);
-        connect_sync!(dim_unfocus_row, changed_entry);
-        connect_sync!(bold_override_row, notify_active);
-        connect_sync!(bold_color_row, changed_entry);
-        connect_sync!(bold_is_bright_row, notify_active);
-        connect_sync!(cursor_override_row, notify_active);
-        connect_sync!(cursor_bg_row, changed_entry);
-        connect_sync!(cursor_fg_row, changed_entry);
-        connect_sync!(highlight_override_row, notify_active);
-        connect_sync!(highlight_bg_row, changed_entry);
-        connect_sync!(highlight_fg_row, changed_entry);
+        connect_sync!(theme_colors_check, notify_active);
+        connect_sync!(bold_bright_check, notify_active);
+        connect_sync!(trans_scale, value_changed);
+        connect_sync!(dim_scale, value_changed);
+        connect_sync!(bold_color_btn, notify_rgba);
+        connect_sync!(cursor_bg_btn, notify_rgba);
+        connect_sync!(cursor_fg_btn, notify_rgba);
+        connect_sync!(hl_bg_btn, notify_rgba);
+        connect_sync!(hl_fg_btn, notify_rgba);
 
-        connect_sync!(show_scrollbar_row, notify_active);
-        connect_sync!(scroll_output_row, notify_active);
-        connect_sync!(scroll_keystroke_row, notify_active);
-        connect_sync!(scroll_unlimited_row, notify_active);
-        connect_sync!(scroll_lines_row, changed_entry);
+        connect_sync!(scrollbar_check, notify_active);
+        connect_sync!(scroll_out_check, notify_active);
+        connect_sync!(scroll_key_check, notify_active);
+        connect_sync!(scroll_lines_spin, value_changed);
 
-        connect_sync!(backspace_row, notify_selected);
-        connect_sync!(delete_row, notify_selected);
-        connect_sync!(encoding_row, notify_selected);
-        connect_sync!(cjk_row, notify_selected);
+        connect_sync!(backspace_combo, notify_selected);
+        connect_sync!(delete_combo, notify_selected);
+        connect_sync!(encoding_combo, notify_selected);
+        connect_sync!(cjk_combo, notify_selected);
 
-        connect_sync!(badge_text_row, changed_entry);
-        connect_sync!(badge_pos_row, notify_selected);
-        connect_sync!(badge_color_override_row, notify_active);
-        connect_sync!(badge_color_row, changed_entry);
-        connect_sync!(badge_sys_font_row, notify_active);
-        connect_sync!(badge_font_row, changed_entry);
+        connect_sync!(badge_entry, changed_entry);
+        connect_sync!(badge_pos_combo, notify_selected);
+        connect_sync!(badge_font_btn, notify_font);
 
-        connect_sync!(silence_row, notify_active);
-        connect_sync!(silence_thresh_row, changed_entry);
+        connect_sync!(silence_check, notify_active);
+        connect_sync!(silence_thresh_spin, value_changed);
 
         // Action button callbacks: Add Profile
         {
@@ -1046,7 +2076,8 @@ impl TilixPreferencesWindow {
             let refresh = Rc::clone(&refresh_profiles_dropdown);
             dup_btn.connect_clicked(move |_| {
                 let curr_id = selected_id.borrow().clone();
-                if let Ok(cloned) = config_rc.borrow_mut().duplicate_profile(&curr_id) {
+                let res = config_rc.borrow_mut().duplicate_profile(&curr_id);
+                if let Ok(cloned) = res {
                     let _ = config_rc.borrow().save();
                     *selected_id.borrow_mut() = cloned.id;
                     refresh();
@@ -1061,7 +2092,8 @@ impl TilixPreferencesWindow {
             let refresh = Rc::clone(&refresh_profiles_dropdown);
             del_btn.connect_clicked(move |_| {
                 let curr_id = selected_id.borrow().clone();
-                if config_rc.borrow_mut().delete_profile(&curr_id).is_ok() {
+                let res = config_rc.borrow_mut().delete_profile(&curr_id);
+                if res.is_ok() {
                     let _ = config_rc.borrow().save();
                     let next_id = config_rc.borrow().profiles[0].id.clone();
                     *selected_id.borrow_mut() = next_id;
@@ -1077,7 +2109,8 @@ impl TilixPreferencesWindow {
             let refresh = Rc::clone(&refresh_profiles_dropdown);
             set_def_btn.connect_clicked(move |_| {
                 let curr_id = selected_id.borrow().clone();
-                if config_rc.borrow_mut().set_default_profile(&curr_id).is_ok() {
+                let res = config_rc.borrow_mut().set_default_profile(&curr_id);
+                if res.is_ok() {
                     let _ = config_rc.borrow().save();
                     refresh();
                 }

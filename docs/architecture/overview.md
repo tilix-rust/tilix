@@ -1,7 +1,7 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.9.0 (Phase 9 Final Architecture)  
+**Version:** 0.10.0 (Phase 10 Profile Preferences UI Parity Architecture)  
 **Date:** 2026-09-17  
 
 
@@ -567,7 +567,65 @@ Phase 8 elevates Tilix's tiling ergonomics to parity with modern tiling IDEs and
 - **Exit Action Handling:** `connect_child_exited` handles `Close` (destroys pane), `Restart` (re-spawns shell in place), and `Hold` (preserves terminal buffer and annotates title with `[Process exited: code]`).
 - **Reactive Profile Application:** `apply_profile` reconfigures live terminals dynamically without restarting running processes.
 
-### 21.6 Libadwaita Profiles Preferences Editor (`src/ui/preferences.rs`)
-- **Profile Management Header:** Combobox selecting from `config.profiles`, with New, Duplicate, Delete (guarded), and Set Default actions.
+### 21.6 Historical Libadwaita Profiles Preferences Editor (`src/ui/preferences.rs`)
+- **Initial Phase 9 Design:** Combobox selecting from `config.profiles`, with New, Duplicate, Delete (guarded), and Set Default actions.
 - **7 Organized Tabs:** General, Command, Color (with transparency and palette overrides), Scrolling, Compatibility, Badge, and Advanced automation.
 - **Instant Reactive Persistence:** Every input modification saves immediately to configuration and pushes updates to all running terminal sessions via `apply_profile_to_all_sessions`.
+
+---
+
+## 22. Profile Preferences UI Parity Subsystem (Phase 10 Architecture)
+
+### 22.1 Visual & Structural Parity Architecture (`src/ui/preferences.rs`)
+- **Libadwaita Row Deprecation:** Replaced generic Libadwaita row containers (`ActionRow`, `SwitchRow`, `SpinRow`, `ComboRow`) and the "Settings Section" dropdown in the Profile page with native GTK4 `gtk::Grid`, `gtk::Box`, and standard GTK4 controls to achieve 100% pixel-and-layout parity with original Tilix screenshots.
+- **Profile Management Header Bar:**
+  - Placed persistently at the top of the Profiles preference page:
+  - `Profile:` bold label.
+  - `gtk::DropDown` populated with profile names, updating selection upon switching.
+  - `[ New ]` button adding a fresh profile and selecting it.
+  - `[ Duplicate ]` button cloning the active profile with `(Copy)` naming.
+  - `[ Delete ]` button styled `.destructive-action`, guarded against deleting the final profile.
+  - `[ Set as Default ]` button promoting the active profile to application-wide default.
+
+### 22.2 Canonical 7-Tab Notebook Structure
+- **gtk::Notebook Integration:** The profile editor mounts directly under the top header bar with 7 canonical tabs:
+  1. **General:** Two-column grid with right-aligned labels.
+     - `Profile name`: `gtk::Entry`.
+     - `Terminal title`: Entry with `pan-down-symbolic` token popover presets (`${id}: ${title}`, `${title}`, `${profile}`, `${directory}`, `${appName}`).
+     - `Terminal size`: Columns and rows spin buttons with dedicated `[ Reset ]` button restoring 80x24.
+     - `Cell spacing`: Width and height spin buttons (1.0..2.0) with dedicated `[ Reset ]` button restoring 1.0x1.0.
+     - `Margin`: Spin button (0..500 px).
+     - `Text blink mode`: Dropdown (`Never`, `Focused`, `Unfocused`, `Always`).
+     - `Custom font`: CheckButton coupled to `gtk::FontButton` sensitivity.
+     - `Word-wise select chars`: Entry for custom word delimiters.
+     - `Cursor`: Shape (`Block`, `I-Beam`, `Underline`) and blink mode (`System`, `On`, `Off`).
+     - `Terminal bell`: Dropdown (`None`, `Sound`, `Icon`, `Icon and sound`).
+  2. **Command:**
+     - `Run command as a login shell`: CheckButton toggling argv0 prefixing.
+     - `Run a custom command instead of my shell`: CheckButton controlling sensitivity of indented custom command entry.
+     - `When command exits`: Dropdown (`Exit the terminal`, `Restart the command`, `Hold the terminal open`).
+  3. **Color:**
+     - Scheme selector dropdown (`Tilix Dark`, `Tilix Light`, `Solarized Dark`, `Monokai`, `Custom`) and `[ Export ]` button saving to user schemes directory.
+     - 2-column, 18-button color palette grid matching upstream layout (Background, Black, Red, Green, Orange, Foreground, Blue, Purple, Turquoise, Grey).
+     - Color customization reactivity: Editing any palette or foreground/background color immediately switches `color_scheme` to `"Custom"`.
+     - Options section: `Use theme colors` CheckButton with `[ Advanced v ]` popover for Bold, Cursor, and Highlight color overrides; `Show bold text in bright colors` CheckButton.
+     - Transparency & Unfocused Dim: Horizontal `gtk::Scale` sliders (0..100) with right-aligned labels.
+  4. **Scrolling:**
+     - CheckButtons for `Show scrollbar`, `Scroll on output`, and `Scroll on keystroke`.
+     - `Limit scrollback to:` CheckButton coupled to SpinButton sensitivity; unchecking configures `scrollback_unlimited = true`.
+  5. **Compatibility:**
+     - Dropdowns for `Backspace key generates` and `Delete key generates` (`Automatic`, `Control-H`, `ASCII DEL`, `Escape sequence`, `TTY`).
+     - `Encoding` dropdown (`UTF-8 Unicode`, `ISO-8859-1`, `Windows-1252`, `US-ASCII`).
+     - `Ambiguous-width characters` dropdown (`Narrow`, `Wide`).
+  6. **Badge:**
+     - Badge text entry with token presets popover (`${directory}`, etc.).
+     - `Badge position` dropdown (`Northwest`, `Northeast`, `Southwest`, `Southeast`).
+     - Custom font CheckButton with coupled `gtk::FontButton` sensitivity.
+  7. **Advanced:**
+     - `Notify New Activity`: Enable by default CheckButton and silence threshold spin button.
+     - `Custom Links`: Management dialog trigger.
+     - `Automatic Profile Switching`: Framed ScrolledWindow with rule list (`hostname:directory`) and modal dialogs for `[ Add ]`, `[ Edit ]`, and `[ Delete ]`.
+
+### 22.3 Reactive State Synchronization
+- Every widget modification immediately mutates `current_config`, writes asynchronously to disk (`save()`), triggers `on_profile_changed()` to broadcast live updates to running terminal panes via `apply_profile_to_all_sessions()`, and updates the dropdown state without refcell borrow conflicts.
+
