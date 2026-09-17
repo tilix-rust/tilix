@@ -210,6 +210,132 @@ impl LayoutNode {
         }
     }
 
+    pub fn orientation_weight(&self, target_orientation: SplitOrientation) -> usize {
+        match self {
+            LayoutNode::Leaf(_) => 1,
+            LayoutNode::Split {
+                orientation,
+                first,
+                second,
+                ..
+            } => {
+                if *orientation == target_orientation {
+                    first.orientation_weight(target_orientation)
+                        + second.orientation_weight(target_orientation)
+                } else {
+                    1
+                }
+            }
+        }
+    }
+
+    pub fn equalize_cluster(&mut self, target_orientation: SplitOrientation) {
+        if let LayoutNode::Split {
+            orientation,
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        {
+            if *orientation == target_orientation {
+                let w1 = first.orientation_weight(target_orientation);
+                let w2 = second.orientation_weight(target_orientation);
+                let total = (w1 + w2) as f64;
+                if total > 0.0 {
+                    *ratio = (w1 as f64 / total).clamp(0.05, 0.95);
+                }
+                first.equalize_cluster(target_orientation);
+                second.equalize_cluster(target_orientation);
+            }
+        }
+    }
+
+    pub fn equalize_all_clusters(&mut self, target_orientation: SplitOrientation) {
+        if let LayoutNode::Split {
+            orientation,
+            first,
+            second,
+            ..
+        } = self
+        {
+            if *orientation == target_orientation {
+                self.equalize_cluster(target_orientation);
+            } else {
+                first.equalize_all_clusters(target_orientation);
+                second.equalize_all_clusters(target_orientation);
+            }
+        }
+    }
+
+    pub fn find_split_orientation(&self, target_id: SplitId) -> Option<SplitOrientation> {
+        match self {
+            LayoutNode::Leaf(_) => None,
+            LayoutNode::Split {
+                id,
+                orientation,
+                first,
+                second,
+                ..
+            } => {
+                if *id == target_id {
+                    Some(*orientation)
+                } else {
+                    first
+                        .find_split_orientation(target_id)
+                        .or_else(|| second.find_split_orientation(target_id))
+                }
+            }
+        }
+    }
+
+    pub fn contains_split(&self, target_id: SplitId) -> bool {
+        match self {
+            LayoutNode::Leaf(_) => false,
+            LayoutNode::Split {
+                id,
+                first,
+                second,
+                ..
+            } => {
+                *id == target_id
+                    || first.contains_split(target_id)
+                    || second.contains_split(target_id)
+            }
+        }
+    }
+
+    pub fn equalize_split_cluster(
+        &mut self,
+        target_id: SplitId,
+        target_orientation: SplitOrientation,
+    ) -> bool {
+        match self {
+            LayoutNode::Leaf(_) => false,
+            LayoutNode::Split {
+                orientation,
+                first,
+                second,
+                ..
+            } => {
+                if *orientation == target_orientation {
+                    if self.contains_split(target_id) {
+                        self.equalize_cluster(target_orientation);
+                        return true;
+                    }
+                } else {
+                    if first.contains_split(target_id) {
+                        return first.equalize_split_cluster(target_id, target_orientation);
+                    }
+                    if second.contains_split(target_id) {
+                        return second.equalize_split_cluster(target_id, target_orientation);
+                    }
+                }
+                false
+            }
+        }
+    }
+
     fn remap_ids(&mut self, next_pane: &mut u64, next_split: &mut u64) {
         match self {
             LayoutNode::Leaf(id) => {
@@ -447,6 +573,24 @@ impl LayoutTree {
         } else {
             false
         }
+    }
+
+    pub fn equalize_split(&mut self, split_id: SplitId) -> bool {
+        let Some(ref mut root) = self.root else {
+            return false;
+        };
+        let Some(orientation) = root.find_split_orientation(split_id) else {
+            return false;
+        };
+        root.equalize_split_cluster(split_id, orientation)
+    }
+
+    pub fn equalize_direction(&mut self, target_orientation: SplitOrientation) -> bool {
+        let Some(ref mut root) = self.root else {
+            return false;
+        };
+        root.equalize_all_clusters(target_orientation);
+        true
     }
 
     pub fn remap_ids(&mut self, next_pane: &mut u64, next_split: &mut u64) {
@@ -950,6 +1094,86 @@ mod tests {
             assert!((ratio - 0.95).abs() < 1e-6);
         } else {
             panic!("Expected root to be split");
+        }
+    }
+
+    #[test]
+    fn test_equalize_split_two_panes() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        tree.set_split_ratio(SplitId(1), 0.8);
+
+        assert!(tree.equalize_split(SplitId(1)));
+        if let Some(LayoutNode::Split { ratio, .. }) = tree.root() {
+            assert!((ratio - 0.5).abs() < 1e-6);
+        } else {
+            panic!("Expected root to be split");
+        }
+    }
+
+    #[test]
+    fn test_equalize_split_three_panes() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2))
+            .unwrap();
+        tree.split(PaneId(2), SplitOrientation::Horizontal, PaneId(3))
+            .unwrap();
+        // Tree: Split1(first: Pane 1, second: Split2(first: Pane 2, second: Pane 3))
+        tree.set_split_ratio(SplitId(1), 0.7);
+        tree.set_split_ratio(SplitId(2), 0.2);
+
+        assert!(tree.equalize_split(SplitId(2)));
+        if let Some(LayoutNode::Split { ratio: r1, second, .. }) = tree.root() {
+            // Root should have ratio 1/3
+            assert!((r1 - (1.0 / 3.0)).abs() < 1e-6);
+            if let LayoutNode::Split { ratio: r2, .. } = &**second {
+                // Second split should have ratio 1/2
+                assert!((r2 - 0.5).abs() < 1e-6);
+            } else {
+                panic!("Expected second node to be split");
+            }
+        } else {
+            panic!("Expected root to be split");
+        }
+    }
+
+    #[test]
+    fn test_equalize_direction_grid() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        // Vertical split: Top (Pane 1) and Bottom (Pane 2)
+        tree.split(PaneId(1), SplitOrientation::Vertical, PaneId(2))
+            .unwrap();
+        // Split Top horizontally: Pane 1 and Pane 3
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(3))
+            .unwrap();
+        // Split Bottom horizontally: Pane 2 and Pane 4
+        tree.split(PaneId(2), SplitOrientation::Horizontal, PaneId(4))
+            .unwrap();
+
+        // Mess up ratios
+        tree.set_split_ratio(SplitId(1), 0.8); // Vertical
+        tree.set_split_ratio(SplitId(2), 0.2); // Top horizontal
+        tree.set_split_ratio(SplitId(3), 0.75); // Bottom horizontal
+
+        // Equalize Horizontal direction only
+        assert!(tree.equalize_direction(SplitOrientation::Horizontal));
+
+        // Vertical ratio should remain unchanged (0.8)
+        if let Some(LayoutNode::Split { ratio: r_v, first, second, .. }) = tree.root() {
+            assert!((r_v - 0.8).abs() < 1e-6);
+            if let LayoutNode::Split { ratio: r_top, .. } = &**first {
+                assert!((r_top - 0.5).abs() < 1e-6);
+            }
+            if let LayoutNode::Split { ratio: r_bot, .. } = &**second {
+                assert!((r_bot - 0.5).abs() < 1e-6);
+            }
+        }
+
+        // Now equalize Vertical direction
+        assert!(tree.equalize_direction(SplitOrientation::Vertical));
+        if let Some(LayoutNode::Split { ratio: r_v, .. }) = tree.root() {
+            assert!((r_v - 0.5).abs() < 1e-6);
         }
     }
 

@@ -801,6 +801,7 @@ impl SessionView {
                 });
 
                 let split_id = *id;
+                let split_orientation = *orientation;
                 let model_clone = Rc::clone(model);
                 paned.connect_notify_local(Some("position"), move |p, _| {
                     let len = match p.orientation() {
@@ -816,7 +817,126 @@ impl SessionView {
                     }
                 });
 
+                // Attach double-click gesture to equalize panes in this direction
+                let mut handle_opt = None;
+                let mut child = paned.first_child();
+                while let Some(c) = child {
+                    if c.css_name() == "separator" {
+                        handle_opt = Some(c);
+                        break;
+                    }
+                    child = c.next_sibling();
+                }
+
+                let paned_weak = paned.downgrade();
+                let model_for_click = Rc::clone(model);
+                let click = gtk::GestureClick::new();
+                click.set_button(gtk::gdk::BUTTON_PRIMARY);
+                click.set_propagation_phase(gtk::PropagationPhase::Capture);
+                let handle_found = handle_opt.is_some();
+                click.connect_pressed(move |gesture, n_press, x, y| {
+                    if n_press == 2 {
+                        let Some(p) = paned_weak.upgrade() else {
+                            return;
+                        };
+                        if !handle_found {
+                            let pos = p.position();
+                            let is_on_handle = match p.orientation() {
+                                gtk::Orientation::Horizontal => (x - pos as f64).abs() <= 8.0,
+                                gtk::Orientation::Vertical => (y - pos as f64).abs() <= 8.0,
+                                _ => false,
+                            };
+                            if !is_on_handle {
+                                return;
+                            }
+                        }
+                        gesture.set_state(gtk::EventSequenceState::Claimed);
+                        if let Ok(mut m) = model_for_click.try_borrow_mut() {
+                            m.layout.equalize_direction(split_orientation);
+                        }
+                        let model_b = model_for_click.borrow();
+                        if let Some(root_node) = model_b.layout.root() {
+                            let mut top = p.clone().upcast::<gtk::Widget>();
+                            while let Some(parent) = top.parent() {
+                                if parent.is::<gtk::Box>() {
+                                    break;
+                                }
+                                top = parent;
+                            }
+                            Self::apply_ratios_recursive(root_node, &top);
+                            let root_clone = root_node.clone();
+                            let top_weak = top.downgrade();
+                            glib::idle_add_local_once(move || {
+                                if let Some(w) = top_weak.upgrade() {
+                                    Self::apply_ratios_recursive(&root_clone, &w);
+                                }
+                            });
+                        }
+                    }
+                });
+
+                if let Some(ref handle) = handle_opt {
+                    handle.add_controller(click);
+                } else {
+                    paned.add_controller(click);
+                }
+
                 paned.upcast()
+            }
+        }
+    }
+
+    fn apply_ratios_recursive(node: &LayoutNode, widget: &gtk::Widget) {
+        if let LayoutNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = node
+        {
+            if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
+                let len = match paned.orientation() {
+                    gtk::Orientation::Horizontal => paned.width(),
+                    gtk::Orientation::Vertical => paned.height(),
+                    _ => paned.width(),
+                };
+                if len > 0 {
+                    paned.set_position((len as f64 * *ratio).round() as i32);
+                }
+                if let Some(c1) = paned.start_child() {
+                    Self::apply_ratios_recursive(first, &c1);
+                }
+                if let Some(c2) = paned.end_child() {
+                    Self::apply_ratios_recursive(second, &c2);
+                }
+            }
+        }
+    }
+
+    pub fn equalize_direction(&self, orientation: SplitOrientation) {
+        if let Ok(mut m) = self.model.try_borrow_mut() {
+            m.layout.equalize_direction(orientation);
+        }
+        self.apply_layout_ratios();
+        let model_clone = Rc::clone(&self.model);
+        let container_weak = self.container.downgrade();
+        glib::idle_add_local_once(move || {
+            if let Some(container) = container_weak.upgrade() {
+                let model_b = model_clone.borrow();
+                if let Some(root_node) = model_b.layout.root() {
+                    if let Some(root_widget) = container.first_child() {
+                        Self::apply_ratios_recursive(root_node, &root_widget);
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn apply_layout_ratios(&self) {
+        let model_b = self.model.borrow();
+        if let Some(root_node) = model_b.layout.root() {
+            if let Some(root_widget) = self.container.first_child() {
+                Self::apply_ratios_recursive(root_node, &root_widget);
             }
         }
     }
@@ -882,6 +1002,7 @@ impl Default for SessionView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SplitId;
 
     #[test]
     fn test_session_view_lifecycle_and_focus() {
@@ -1163,6 +1284,89 @@ mod tests {
 
             session_a.close();
             session_b.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_equalize_direction_horizontal() {
+        crate::ui::window::run_gtk_test(|| {
+            let session = SessionView::new();
+            session.split_active(SplitOrientation::Horizontal);
+            session.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session.pane_count(), 3);
+
+            // Mess up ratios in layout
+            session.model_mut().layout.set_split_ratio(SplitId(1), 0.8);
+            session.model_mut().layout.set_split_ratio(SplitId(2), 0.2);
+
+            // Call equalize_direction on Horizontal
+            session.equalize_direction(SplitOrientation::Horizontal);
+
+            // Model should have equalized ratios (1/3 and 1/2)
+            if let Some(LayoutNode::Split { ratio: r1, second, .. }) = session.model().layout.root() {
+                assert!((r1 - (1.0 / 3.0)).abs() < 1e-6);
+                if let LayoutNode::Split { ratio: r2, .. } = &**second {
+                    assert!((r2 - 0.5).abs() < 1e-6);
+                } else {
+                    panic!("Expected second node to be split");
+                }
+            } else {
+                panic!("Expected root to be split");
+            }
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_equalize_direction_vertical() {
+        crate::ui::window::run_gtk_test(|| {
+            let session = SessionView::new();
+            session.split_active(SplitOrientation::Vertical);
+            assert_eq!(session.pane_count(), 2);
+
+            // Mess up ratio
+            session.model_mut().layout.set_split_ratio(SplitId(1), 0.85);
+
+            // Call equalize_direction on Vertical
+            session.equalize_direction(SplitOrientation::Vertical);
+
+            if let Some(LayoutNode::Split { ratio, .. }) = session.model().layout.root() {
+                assert!((ratio - 0.5).abs() < 1e-6);
+            } else {
+                panic!("Expected root to be split");
+            }
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_paned_separator_gesture_attached() {
+        crate::ui::window::run_gtk_test(|| {
+            crate::ui::window::setup_css();
+            let session = SessionView::new();
+            session.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session.pane_count(), 2);
+
+            let root_widget = session.container.first_child().expect("root widget must exist");
+            let paned = root_widget.downcast_ref::<gtk::Paned>().expect("root widget must be GtkPaned");
+
+            // Check that separator handle exists and has controller
+            let mut handle_found = false;
+            let mut child = paned.first_child();
+            while let Some(c) = child {
+                if c.css_name() == "separator" {
+                    handle_found = true;
+                    // Verify separator is a GtkPanedHandle widget
+                    assert_eq!(c.css_name(), "separator");
+                    break;
+                }
+                child = c.next_sibling();
+            }
+            assert!(handle_found, "Separator handle must exist in GtkPaned");
+
+            session.close();
         });
     }
 }

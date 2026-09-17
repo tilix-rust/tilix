@@ -194,12 +194,12 @@ pub fn setup_css() {
         }
         paned.horizontal > separator:not(.wide) {
             min-width: 1px;
-            margin: 0 -4px;
+            margin: 0;
             padding: 0 4px;
         }
         paned.vertical > separator:not(.wide) {
             min-height: 1px;
-            margin: -4px 0;
+            margin: 0;
             padding: 4px 0;
         }
         paned > separator:hover,
