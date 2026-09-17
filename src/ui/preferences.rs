@@ -98,6 +98,55 @@ impl TilixPreferencesWindow {
 
         window.add(&page);
 
+        // Behavior Page
+        let behavior_page = adw::PreferencesPage::new();
+        behavior_page.set_title("Behavior");
+        behavior_page.set_icon_name(Some("preferences-system-symbolic"));
+
+        // Quake Group
+        let quake_group = adw::PreferencesGroup::new();
+        quake_group.set_title("Quake Drop-Down");
+        behavior_page.add(&quake_group);
+
+        let quake_height_adj = gtk::Adjustment::new(
+            current_config.borrow().quake_height_percent as f64,
+            10.0,
+            100.0,
+            5.0,
+            10.0,
+            0.0,
+        );
+        let quake_height_row = adw::SpinRow::new(Some(&quake_height_adj), 1.0, 0);
+        quake_height_row.set_title("Quake Height Percentage");
+        quake_group.add(&quake_height_row);
+
+        let quake_unfocus_row = adw::SwitchRow::new();
+        quake_unfocus_row.set_title("Hide Quake on Focus Loss");
+        quake_unfocus_row.set_active(current_config.borrow().quake_hide_on_unfocus);
+        quake_group.add(&quake_unfocus_row);
+
+        // Notifications Group
+        let notif_group = adw::PreferencesGroup::new();
+        notif_group.set_title("Notifications");
+        behavior_page.add(&notif_group);
+
+        let notif_enabled_row = adw::SwitchRow::new();
+        notif_enabled_row.set_title("Enable Notifications");
+        notif_enabled_row.set_active(current_config.borrow().notifications_enabled);
+        notif_group.add(&notif_enabled_row);
+
+        let notif_bell_row = adw::SwitchRow::new();
+        notif_bell_row.set_title("Terminal Bell Notifications");
+        notif_bell_row.set_active(current_config.borrow().bell_notifications);
+        notif_group.add(&notif_bell_row);
+
+        let notif_exit_row = adw::SwitchRow::new();
+        notif_exit_row.set_title("Process Exit Notifications");
+        notif_exit_row.set_active(current_config.borrow().process_exit_notifications);
+        notif_group.add(&notif_exit_row);
+
+        window.add(&behavior_page);
+
         // Helper to apply and save changes
         let sync_and_save = {
             let config_rc = Rc::clone(&current_config);
@@ -106,6 +155,11 @@ impl TilixPreferencesWindow {
             let s_row = shape_row.clone();
             let b_row = blink_row.clone();
             let f_entry = font_entry.clone();
+            let q_height = quake_height_row.clone();
+            let q_unfocus = quake_unfocus_row.clone();
+            let n_enabled = notif_enabled_row.clone();
+            let n_bell = notif_bell_row.clone();
+            let n_exit = notif_exit_row.clone();
 
             Rc::new(move || {
                 let color_scheme = match c_row.selected() {
@@ -140,6 +194,12 @@ impl TilixPreferencesWindow {
                 cfg.default_profile.cursor_blink = cursor_blink;
                 cfg.default_profile.font = font;
 
+                cfg.quake_height_percent = q_height.value() as u32;
+                cfg.quake_hide_on_unfocus = q_unfocus.is_active();
+                cfg.notifications_enabled = n_enabled.is_active();
+                cfg.bell_notifications = n_bell.is_active();
+                cfg.process_exit_notifications = n_exit.is_active();
+
                 let _ = cfg.save();
                 on_change_cb(&cfg.default_profile);
             })
@@ -160,6 +220,26 @@ impl TilixPreferencesWindow {
         {
             let s = Rc::clone(&sync_and_save);
             font_entry.connect_changed(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            quake_height_row.connect_changed(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            quake_unfocus_row.connect_active_notify(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            notif_enabled_row.connect_active_notify(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            notif_bell_row.connect_active_notify(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            notif_exit_row.connect_active_notify(move |_| s());
         }
 
         Self { window }

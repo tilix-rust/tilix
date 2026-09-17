@@ -23,6 +23,12 @@ impl TilixQuakeWindow {
 
         let session_view = Rc::new(RefCell::new(SessionView::new()));
         window.set_content(Some(session_view.borrow().widget()));
+        crate::ui::window::register_session_widget(session_view.borrow().widget(), Rc::clone(&session_view));
+
+        window.connect_close_request(|win| {
+            win.set_visible(false);
+            glib::Propagation::Stop
+        });
 
         let session_weak = Rc::downgrade(&session_view);
         let window_weak = window.downgrade();

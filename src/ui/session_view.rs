@@ -118,7 +118,8 @@ impl SessionView {
         swap_handler: &Rc<RefCell<Option<SwapHandler>>>,
     ) -> TerminalPane {
         let pane = TerminalPane::new(id, initial_directory);
-        pane.apply_profile(&Profile::default());
+        let cfg = crate::model::AppConfig::load();
+        pane.apply_profile(&cfg.default_profile);
 
         pane.setup_drag_source();
         let swap_cb = Rc::clone(swap_handler);

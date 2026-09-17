@@ -101,13 +101,16 @@ impl TilixApplication {
                         }
                     }
                     CliAction::Preferences => {
+                        let on_change = move |profile: &crate::model::Profile| {
+                            crate::ui::window::apply_profile_to_all_sessions(profile);
+                        };
                         if let Some(active_win) = app.active_window() {
-                            let pref = TilixPreferencesWindow::new(&active_win, move |_profile| {});
+                            let pref = TilixPreferencesWindow::new(&active_win, on_change);
                             pref.present();
                         } else {
                             let win = TilixWindow::new(app);
                             win.present();
-                            let pref = TilixPreferencesWindow::new(win.window(), move |_profile| {});
+                            let pref = TilixPreferencesWindow::new(win.window(), on_change);
                             pref.present();
                         }
                     }

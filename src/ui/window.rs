@@ -18,6 +18,22 @@ thread_local! {
     static WIDGET_TO_SESSION: RefCell<HashMap<gtk::Widget, Rc<RefCell<SessionView>>>> = RefCell::new(HashMap::new());
 }
 
+pub fn register_session_widget(widget: &gtk::Widget, session: Rc<RefCell<SessionView>>) {
+    WIDGET_TO_SESSION.with(|m| m.borrow_mut().insert(widget.clone(), session));
+}
+
+pub fn unregister_session_widget(widget: &gtk::Widget) {
+    WIDGET_TO_SESSION.with(|m| m.borrow_mut().remove(widget));
+}
+
+pub fn apply_profile_to_all_sessions(profile: &Profile) {
+    WIDGET_TO_SESSION.with(|m| {
+        for session in m.borrow().values() {
+            session.borrow().apply_profile(profile);
+        }
+    });
+}
+
 pub fn setup_css() {
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_string(
@@ -467,11 +483,7 @@ impl TilixWindow {
             action.connect_activate(move |_, _| {
                 let Some(win) = win_weak.upgrade() else { return; };
                 let pref = TilixPreferencesWindow::new(&win, move |profile| {
-                    WIDGET_TO_SESSION.with(|m| {
-                        for session in m.borrow().values() {
-                            session.borrow().apply_profile(profile);
-                        }
-                    });
+                    apply_profile_to_all_sessions(profile);
                 });
                 pref.present();
             });
@@ -730,5 +742,15 @@ mod tests {
         // Close one of the tabs
         close_action.activate(None);
         assert_eq!(tab_view.n_pages(), 2);
+
+        // Test preferences action and profile broadcast
+        let pref_action = window
+            .lookup_action("preferences")
+            .expect("preferences action must exist");
+        pref_action.activate(None);
+
+        let mut test_profile = Profile::default();
+        test_profile.color_scheme = crate::model::ColorScheme::monokai();
+        apply_profile_to_all_sessions(&test_profile);
     }
 }
