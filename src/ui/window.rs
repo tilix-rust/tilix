@@ -8,7 +8,9 @@ use gio::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use crate::model::{Direction, Profile, SessionLayoutTemplate, SplitOrientation};
+use crate::model::{
+    Direction, PaneTitleStyle, Profile, SessionLayoutTemplate, SplitOrientation, WindowStyle,
+};
 use crate::ui::preferences::TilixPreferencesWindow;
 use crate::ui::session_view::{SessionAction, SessionView};
 
@@ -16,6 +18,7 @@ type SessionMap = Rc<RefCell<HashMap<adw::TabPage, Rc<RefCell<SessionView>>>>>;
 
 thread_local! {
     static WIDGET_TO_SESSION: RefCell<HashMap<gtk::Widget, Rc<RefCell<SessionView>>>> = RefCell::new(HashMap::new());
+    static WINDOW_HEADER_BARS: RefCell<Vec<glib::WeakRef<adw::HeaderBar>>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn register_session_widget(widget: &gtk::Widget, session: Rc<RefCell<SessionView>>) {
@@ -30,6 +33,35 @@ pub fn apply_profile_to_all_sessions(profile: &Profile) {
     WIDGET_TO_SESSION.with(|m| {
         for session in m.borrow().values() {
             session.borrow().apply_profile(profile);
+        }
+    });
+}
+
+pub fn apply_window_style_to_all_windows(style: WindowStyle) {
+    WINDOW_HEADER_BARS.with(|bars| {
+        bars.borrow_mut().retain(|bar_weak| {
+            if let Some(bar) = bar_weak.upgrade() {
+                bar.set_visible(style != WindowStyle::HideToolbar);
+                true
+            } else {
+                false
+            }
+        });
+    });
+}
+
+pub fn apply_wide_handle_to_all_sessions(wide: bool) {
+    WIDGET_TO_SESSION.with(|m| {
+        for session in m.borrow().values() {
+            session.borrow().set_wide_handle(wide);
+        }
+    });
+}
+
+pub fn apply_pane_title_settings_to_all_sessions(style: PaneTitleStyle, show_when_single: bool) {
+    WIDGET_TO_SESSION.with(|m| {
+        for session in m.borrow().values() {
+            session.borrow().set_pane_title_settings(style, show_when_single);
         }
     });
 }
@@ -97,6 +129,10 @@ impl TilixWindow {
         window.set_title(Some("Tilix"));
 
         let header_bar = adw::HeaderBar::new();
+        let cfg = crate::model::AppConfig::load();
+        header_bar.set_visible(cfg.window_style != WindowStyle::HideToolbar);
+        WINDOW_HEADER_BARS.with(|bars| bars.borrow_mut().push(header_bar.downgrade()));
+
         let title_widget = adw::WindowTitle::new("Tilix", "");
         header_bar.set_title_widget(Some(&title_widget));
 
@@ -134,7 +170,7 @@ impl TilixWindow {
         let tab_view = adw::TabView::new();
         let tab_bar = adw::TabBar::new();
         tab_bar.set_view(Some(&tab_view));
-        tab_bar.set_autohide(true);
+        tab_bar.set_autohide(false);
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header_bar);
@@ -208,9 +244,10 @@ impl TilixWindow {
                 Rc::new(RefCell::new(SessionView::with_id_and_dir(initial_pane_id, initial_directory)))
             }
         };
-
-        let tab_page = tab_view.append(session_view.borrow().widget());
-        WIDGET_TO_SESSION.with(|m| m.borrow_mut().insert(tab_page.child(), Rc::clone(&session_view)));
+        let widget = session_view.borrow().widget().clone();
+        WIDGET_TO_SESSION.with(|m| m.borrow_mut().insert(widget.clone(), Rc::clone(&session_view)));
+        let tab_page = tab_view.append(&widget);
+        sessions.borrow_mut().insert(tab_page.clone(), Rc::clone(&session_view));
 
         // Set initial title and bind title changes
         let initial_title = session_view.borrow().active_title();
@@ -679,78 +716,165 @@ impl TilixWindow {
 }
 
 #[cfg(test)]
+pub(crate) fn run_gtk_test<F: FnOnce() + Send + 'static>(f: F) {
+    static GTK_TEST_POOL: std::sync::OnceLock<Option<glib::ThreadPool>> = std::sync::OnceLock::new();
+    let pool = GTK_TEST_POOL.get_or_init(|| {
+        let (init_tx, init_rx) = std::sync::mpsc::sync_channel(1);
+        let Ok(pool) = glib::ThreadPool::exclusive(1) else {
+            return None;
+        };
+        if pool
+            .push(move || {
+                let ok = gtk::init().is_ok();
+                let _ = init_tx.send(ok);
+            })
+            .is_err()
+        {
+            return None;
+        }
+        if init_rx.recv().unwrap_or(false) {
+            Some(pool)
+        } else {
+            None
+        }
+    });
+
+    if let Some(pool) = pool.as_ref() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        pool.push(move || {
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            let _ = tx.send(res);
+        })
+        .expect("failed to push test");
+        match rx.recv().expect("failed to wait for test") {
+            Ok(()) => {}
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_window_new_tab_action_after_drop() {
-        if gtk::init().is_err() {
-            return;
-        }
+        run_gtk_test(|| {
+            let app = adw::Application::builder()
+                .application_id("com.github.tilix_rust.test_window_tab")
+                .flags(gio::ApplicationFlags::NON_UNIQUE)
+                .build();
 
-        let app = adw::Application::builder()
-            .application_id("com.github.tilix_rust.test_window_tab")
-            .flags(gio::ApplicationFlags::NON_UNIQUE)
-            .build();
+            let tilix_win = TilixWindow::new(&app);
+            let window = tilix_win.window().clone();
+            let tab_view = tilix_win.tab_view().clone();
 
-        let tilix_win = TilixWindow::new(&app);
-        let window = tilix_win.window().clone();
-        let tab_view = tilix_win.tab_view().clone();
+            assert_eq!(tab_view.n_pages(), 1);
 
-        assert_eq!(tab_view.n_pages(), 1);
+            // Drop the TilixWindow struct to simulate it leaving scope in connect_activate / connect_command_line
+            drop(tilix_win);
 
-        // Drop the TilixWindow struct to simulate it leaving scope in connect_activate / connect_command_line
-        drop(tilix_win);
+            // Activate win.new-tab action (which the HeaderBar button and Ctrl+Shift+T invoke)
+            let action = window
+                .lookup_action("new-tab")
+                .expect("new-tab action must exist");
+            action.activate(None);
 
-        // Activate win.new-tab action (which the HeaderBar button and Ctrl+Shift+T invoke)
-        let action = window
-            .lookup_action("new-tab")
-            .expect("new-tab action must exist");
-        action.activate(None);
+            // Verify that a second tab was created
+            assert_eq!(tab_view.n_pages(), 2);
 
-        // Verify that a second tab was created
-        assert_eq!(tab_view.n_pages(), 2);
+            // Activate new-tab action again
+            action.activate(None);
+            assert_eq!(tab_view.n_pages(), 3);
 
-        // Activate new-tab action again
-        action.activate(None);
-        assert_eq!(tab_view.n_pages(), 3);
+            // Test tab navigation
+            let next_action = window
+                .lookup_action("tab-next")
+                .expect("tab-next action must exist");
+            next_action.activate(None);
 
-        // Test tab navigation
-        let next_action = window
-            .lookup_action("tab-next")
-            .expect("tab-next action must exist");
-        next_action.activate(None);
+            let switch_action = window
+                .lookup_action("switch-tab-1")
+                .expect("switch-tab-1 action must exist");
+            switch_action.activate(None);
 
-        let switch_action = window
-            .lookup_action("switch-tab-1")
-            .expect("switch-tab-1 action must exist");
-        switch_action.activate(None);
+            // Test split-right on the active tab
+            let split_action = window
+                .lookup_action("split-right")
+                .expect("split-right action must exist");
+            split_action.activate(None);
 
-        // Test split-right on the active tab
-        let split_action = window
-            .lookup_action("split-right")
-            .expect("split-right action must exist");
-        split_action.activate(None);
+            // Test close-pane closes split first
+            let close_action = window
+                .lookup_action("close-pane")
+                .expect("close-pane action must exist");
+            close_action.activate(None);
+            assert_eq!(tab_view.n_pages(), 3);
 
-        // Test close-pane closes split first
-        let close_action = window
-            .lookup_action("close-pane")
-            .expect("close-pane action must exist");
-        close_action.activate(None);
-        assert_eq!(tab_view.n_pages(), 3);
+            // Close one of the tabs
+            close_action.activate(None);
+            assert_eq!(tab_view.n_pages(), 2);
 
-        // Close one of the tabs
-        close_action.activate(None);
-        assert_eq!(tab_view.n_pages(), 2);
+            // Test preferences action and profile broadcast
+            let pref_action = window
+                .lookup_action("preferences")
+                .expect("preferences action must exist");
+            pref_action.activate(None);
 
-        // Test preferences action and profile broadcast
-        let pref_action = window
-            .lookup_action("preferences")
-            .expect("preferences action must exist");
-        pref_action.activate(None);
+            let test_profile = Profile {
+                color_scheme: crate::model::ColorScheme::monokai(),
+                ..Default::default()
+            };
+            apply_profile_to_all_sessions(&test_profile);
+        });
+    }
 
-        let mut test_profile = Profile::default();
-        test_profile.color_scheme = crate::model::ColorScheme::monokai();
-        apply_profile_to_all_sessions(&test_profile);
+    #[test]
+    fn test_window_style_header_bar_toggle() {
+        run_gtk_test(|| {
+            let app = adw::Application::builder()
+                .application_id("com.github.tilix_rust.test_window_style")
+                .flags(gio::ApplicationFlags::NON_UNIQUE)
+                .build();
+            let tilix_win = TilixWindow::new_empty(&app);
+
+            let header_bar = WINDOW_HEADER_BARS
+                .with(|bars| bars.borrow().last().and_then(|w| w.upgrade()))
+                .expect("Header bar must be registered");
+
+            apply_window_style_to_all_windows(WindowStyle::HideToolbar);
+            assert!(!header_bar.get_visible());
+
+            apply_window_style_to_all_windows(WindowStyle::Normal);
+            assert!(header_bar.get_visible());
+
+            drop(tilix_win);
+        });
+    }
+
+    #[test]
+    fn test_apply_pane_title_settings_to_all_sessions() {
+        run_gtk_test(|| {
+            let session = Rc::new(RefCell::new(SessionView::new()));
+            let widget = session.borrow().widget().clone();
+            register_session_widget(&widget, Rc::clone(&session));
+
+            // Default: Normal, true
+            assert_eq!(session.borrow().pane_title_style(), PaneTitleStyle::Normal);
+            assert!(session.borrow().pane_title_show_when_single());
+
+            // Broadcast None, false
+            apply_pane_title_settings_to_all_sessions(PaneTitleStyle::None, false);
+            assert_eq!(session.borrow().pane_title_style(), PaneTitleStyle::None);
+            assert!(!session.borrow().pane_title_show_when_single());
+
+            // Broadcast Normal, true
+            apply_pane_title_settings_to_all_sessions(PaneTitleStyle::Normal, true);
+            assert_eq!(session.borrow().pane_title_style(), PaneTitleStyle::Normal);
+            assert!(session.borrow().pane_title_show_when_single());
+
+            unregister_session_widget(&widget);
+            session.borrow().close();
+        });
     }
 }

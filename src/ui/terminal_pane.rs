@@ -95,6 +95,8 @@ impl TerminalPane {
         terminal.set_vexpand(true);
         terminal.set_hexpand(true);
         terminal.set_can_focus(true);
+        terminal.set_scroll_on_output(true);
+        terminal.set_scroll_on_keystroke(true);
 
         // Wire click gesture on header to focus terminal
         {
@@ -500,6 +502,33 @@ impl TerminalPane {
 
     pub fn setup_drop_target<F: Fn(PaneId, PaneId) + 'static>(&self, on_swap: F) {
         crate::ui::dnd::setup_pane_drop_target(&self.container, self.pane_id, on_swap);
+    }
+
+    pub fn set_header_visible(&self, visible: bool) {
+        self.header.set_visible(visible);
+    }
+
+    pub fn is_header_visible(&self) -> bool {
+        self.header.get_visible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_terminal_pane_header_visibility() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(1), None);
+            assert!(pane.is_header_visible());
+
+            pane.set_header_visible(false);
+            assert!(!pane.is_header_visible());
+
+            pane.set_header_visible(true);
+            assert!(pane.is_header_visible());
+        });
     }
 }
 

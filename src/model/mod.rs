@@ -5,7 +5,7 @@ pub mod session;
 pub mod template;
 pub mod theme;
 
-pub use config::AppConfig;
+pub use config::{AppConfig, PaneTitleStyle, WindowStyle};
 pub use layout::{Direction, LayoutError, LayoutNode, LayoutTree, PaneId, SplitId, SplitOrientation};
 pub use profile::{CursorBlinkPreference, CursorShapePreference, Profile};
 pub use session::{SessionModel, SyncGroupId};

@@ -5,7 +5,7 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use crate::model::config::AppConfig;
+use crate::model::config::{AppConfig, PaneTitleStyle, WindowStyle};
 use crate::model::profile::{CursorBlinkPreference, CursorShapePreference, Profile};
 use crate::model::theme::ColorScheme;
 
@@ -96,6 +96,54 @@ impl TilixPreferencesWindow {
         group.add(&blink_row);
         group.add(&font_row);
 
+        // Window Group
+        let window_group = adw::PreferencesGroup::new();
+        window_group.set_title("Window");
+
+        let window_style_names = ["Normal", "Hide Toolbar"];
+        let window_style_model = gtk::StringList::new(&window_style_names);
+        let window_style_row = adw::ComboRow::new();
+        window_style_row.set_title("Window Style");
+        window_style_row.set_model(Some(&window_style_model));
+        let style_idx = match current_config.borrow().window_style {
+            WindowStyle::Normal => 0,
+            WindowStyle::HideToolbar => 1,
+        };
+        window_style_row.set_selected(style_idx);
+        window_group.add(&window_style_row);
+
+        let wide_handle_row = adw::SwitchRow::new();
+        wide_handle_row.set_title("Use a wide handle for splitters");
+        wide_handle_row.set_subtitle("Increase draggable handle size between split panes");
+        wide_handle_row.set_active(current_config.borrow().use_wide_handle);
+        window_group.add(&wide_handle_row);
+
+        page.add(&window_group);
+
+        // Terminal Title Group
+        let title_group = adw::PreferencesGroup::new();
+        title_group.set_title("Terminal Title");
+
+        let title_style_names = ["Normal", "None"];
+        let title_style_model = gtk::StringList::new(&title_style_names);
+        let title_style_row = adw::ComboRow::new();
+        title_style_row.set_title("Title Style");
+        title_style_row.set_model(Some(&title_style_model));
+        let title_idx = match current_config.borrow().pane_title_style {
+            PaneTitleStyle::Normal => 0,
+            PaneTitleStyle::None => 1,
+        };
+        title_style_row.set_selected(title_idx);
+        title_group.add(&title_style_row);
+
+        let title_show_single_row = adw::SwitchRow::new();
+        title_show_single_row.set_title("Show title when single terminal");
+        title_show_single_row.set_subtitle("Display terminal pane header bar even when no splits exist");
+        title_show_single_row.set_active(current_config.borrow().pane_title_show_when_single);
+        title_group.add(&title_show_single_row);
+
+        page.add(&title_group);
+
         window.add(&page);
 
         // Behavior Page
@@ -160,6 +208,10 @@ impl TilixPreferencesWindow {
             let n_enabled = notif_enabled_row.clone();
             let n_bell = notif_bell_row.clone();
             let n_exit = notif_exit_row.clone();
+            let w_style = window_style_row.clone();
+            let w_handle = wide_handle_row.clone();
+            let t_style = title_style_row.clone();
+            let t_single = title_show_single_row.clone();
 
             Rc::new(move || {
                 let color_scheme = match c_row.selected() {
@@ -188,6 +240,18 @@ impl TilixPreferencesWindow {
                     Some(font_text)
                 };
 
+                let window_style = match w_style.selected() {
+                    1 => WindowStyle::HideToolbar,
+                    _ => WindowStyle::Normal,
+                };
+                let use_wide_handle = w_handle.is_active();
+
+                let pane_title_style = match t_style.selected() {
+                    1 => PaneTitleStyle::None,
+                    _ => PaneTitleStyle::Normal,
+                };
+                let pane_title_show_when_single = t_single.is_active();
+
                 let mut cfg = config_rc.borrow_mut();
                 cfg.default_profile.color_scheme = color_scheme;
                 cfg.default_profile.cursor_shape = cursor_shape;
@@ -199,8 +263,18 @@ impl TilixPreferencesWindow {
                 cfg.notifications_enabled = n_enabled.is_active();
                 cfg.bell_notifications = n_bell.is_active();
                 cfg.process_exit_notifications = n_exit.is_active();
+                cfg.window_style = window_style;
+                cfg.use_wide_handle = use_wide_handle;
+                cfg.pane_title_style = pane_title_style;
+                cfg.pane_title_show_when_single = pane_title_show_when_single;
 
                 let _ = cfg.save();
+                crate::ui::window::apply_window_style_to_all_windows(cfg.window_style);
+                crate::ui::window::apply_wide_handle_to_all_sessions(cfg.use_wide_handle);
+                crate::ui::window::apply_pane_title_settings_to_all_sessions(
+                    cfg.pane_title_style,
+                    cfg.pane_title_show_when_single,
+                );
                 on_change_cb(&cfg.default_profile);
             })
         };
@@ -240,6 +314,22 @@ impl TilixPreferencesWindow {
         {
             let s = Rc::clone(&sync_and_save);
             notif_exit_row.connect_active_notify(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            window_style_row.connect_selected_notify(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            wide_handle_row.connect_active_notify(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            title_style_row.connect_selected_notify(move |_| s());
+        }
+        {
+            let s = Rc::clone(&sync_and_save);
+            title_show_single_row.connect_active_notify(move |_| s());
         }
 
         Self { window }

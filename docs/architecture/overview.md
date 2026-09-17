@@ -1,8 +1,8 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.4.0 (Phase 4 Final Architecture)  
-**Date:** 2026-09-16  
+**Version:** 0.6.0 (Phase 6 Final Architecture)  
+**Date:** 2026-09-17  
 
 ---
 
@@ -53,14 +53,14 @@ flowchart TD
         TabBar["AdwTabBar (autohide = true)"]
         TabView["AdwTabView (Multi-Session & Tab DND)"]
         SV1["SessionView"]
-        TP1["TerminalPane 1<br/>(DragSource + DropTarget)"]
-        TP2["TerminalPane 2<br/>(DragSource + DropTarget)"]
+        TP1["TerminalPane 1<br/>(Header Visibility + DND)"]
+        TP2["TerminalPane 2<br/>(Header Visibility + DND)"]
     end
 
     subgraph Domain_Model ["Headless Domain Model (Pure Rust)"]
         SM["SessionModel"]
         LT["LayoutTree (swap_panes, set_split_ratio)"]
-        Cfg["AppConfig (serde default compatibility)"]
+        Cfg["AppConfig (WindowStyle, WideHandle, PaneTitleStyle, ShowWhenSingle)"]
         Prof["Profile / ColorScheme"]
         OSC7["parse_osc7_uri(uri)"]
     end
@@ -79,14 +79,15 @@ flowchart TD
     TabView <-->|Tab DND / Detach| Win
     TabView --> SV1
     QuakeWin --> SV1
-    SV1 --> TP1
-    SV1 --> TP2
+    SV1 -->|Controls Header Visibility| TP1
+    SV1 -->|Controls Header Visibility| TP2
 
     TP1 <-->|DND Pane Swap| TP2
     SV1 <-->|Syncs| SM
     SM --> LT
-    PrefWin -.->|Updates Profile| Cfg
-    Cfg -.->|Broadcasting| SV1
+    PrefWin -.->|Updates Profile, Style, Wide Handle & Pane Title| Cfg
+    Cfg -.->|Broadcast Profile, Wide Handle & Pane Title| SV1
+    Cfg -.->|Broadcast Window Style| Win
 
     TP1 -->|connect_current_directory_uri_changed| OSC7
     OSC7 -->|Pass CWD to new splits/tabs| CWD
@@ -241,8 +242,10 @@ When `LayoutTree` changes (split, close, rebalance, swap):
 
 ## 14. Reactive Preferences & Desktop Notifications
 
-- `AdwPreferencesWindow` provides interactive appearance controls.
-- `AppConfig` persisted to `~/.config/tilix/config.json` with `#[serde(default)]`.
+- `AdwPreferencesWindow` provides interactive appearance, window, terminal title, behavior, and notification controls.
+- Dedicated "Window" group on the "Appearance" page offers "Window Style" (`adw::ComboRow`) and "Use a wide handle for splitters" (`adw::SwitchRow`).
+- Dedicated "Terminal Title" group on the "Appearance" page offers "Title Style" (`adw::ComboRow`: "Normal", "None") and "Show title when single terminal" (`adw::SwitchRow`).
+- `AppConfig` persisted to `~/.config/tilix/config.json` with `#[serde(default)]`, ensuring backwards and forwards schema compatibility across releases.
 - `NotificationService` dispatches desktop notifications for bell events and process completions with dynamic title lookup.
 
 ---
@@ -262,3 +265,69 @@ When `LayoutTree` changes (split, close, rebalance, swap):
    - Manifest `build-aux/com.github.tilix_rust.json` targeting GNOME Platform 47 with appropriate terminal permissions.
 4. **Makefile Automation:**
    - Standard `Makefile` supporting `DESTDIR` and `PREFIX` for reproducible system installation and package staging.
+
+---
+
+## 16. Window Style Configuration & Splitter Wide Handle Architecture (Phase 5)
+
+Phase 5 introduces comprehensive configuration for terminal window chrome and splitter ergonomics, directly restoring key capabilities from original Tilix within modern GTK4/Libadwaita:
+
+### 16.1 Domain Model & Compatibility
+- **`WindowStyle` Enum:** Headless enum (`Normal`, `HideToolbar`) in `src/model/config.rs` with `#[serde(rename_all = "snake_case")]`. Default is `WindowStyle::Normal`.
+- **Wide Handle Flag:** `use_wide_handle: bool` on `AppConfig`. Defaults to `false` in compliance with standard GNOME HIG thin divider ergonomics.
+- **Backwards & Forwards Compatibility:** Rooted on `#[serde(default)]` on `AppConfig`, allowing legacy configs from Phase 1–4 omitting these fields to deserialize cleanly, while ignoring unexpected future attributes.
+
+### 16.2 Reactive Window Style Projection (`TilixWindow`)
+- **Header Bar Registry:** Thread-local `WINDOW_HEADER_BARS: RefCell<Vec<glib::WeakRef<adw::HeaderBar>>>` tracks active window header bars via weak references, eliminating memory leaks or dangling pointers on window closure.
+- **Dynamic Toolbar Toggle:** `apply_window_style_to_all_windows(style)` dynamically toggles visibility across all open windows without restarting the application.
+- **Accelerator Retention:** All window-level accelerators (`win.new-tab`, `win.preferences`, `win.split-right`, `win.split-down`, `win.close-pane`) registered on `adw::ApplicationWindow` remain 100% functional when the header bar is hidden.
+
+### 16.3 Reactive Splitter Wide Handle Projection (`SessionView`)
+- **State Storage:** `SessionView` maintains `use_wide_handle: Rc<RefCell<bool>>`, initialized from configuration upon construction.
+- **Construction & In-Place Traversal:**
+  - `build_node` propagates `wide_handle` to newly instantiated `gtk::Paned` widgets.
+  - `set_wide_handle(&self, wide: bool)` performs in-place recursive traversal (`set_paneds_wide_handle`) over existing widget trees in `self.container`.
+  - Avoids widget reparenting, terminal reloads, or PTY interruptions.
+- **Session Broadcast:** `apply_wide_handle_to_all_sessions(wide)` broadcasts updates across all active sessions registered in `WIDGET_TO_SESSION`.
+
+---
+
+## 17. Terminal Pane Title & Toolbar Visibility Controls (Phase 6)
+
+Phase 6 implements granular visibility controls for terminal pane header bars and titles, directly restoring Tilix's classic title style options and single-terminal title toggling.
+
+### 17.1 Domain Model & Configuration Schema
+- **`PaneTitleStyle` Enum:** Headless enum (`Normal`, `None`) defined in `src/model/config.rs` with `#[serde(rename_all = "snake_case")]` and defaulting to `PaneTitleStyle::Normal`.
+  - Re-exported through `src/model/mod.rs` for public API consistency.
+- **`AppConfig` Attributes:**
+  - `pub pane_title_style: PaneTitleStyle`: Defaults to `PaneTitleStyle::Normal`.
+  - `pub pane_title_show_when_single: bool`: Defaults to `true` (classic default where the pane header bar is visible even with a single terminal).
+- **Schema Compatibility:** Full Serde roundtrip support and backward compatibility with legacy configuration versions (Phase 1–5), providing seamless fallback to defaults for missing keys and ignoring future attributes.
+
+### 17.2 TerminalPane Header Visibility API
+- **Header Container:** The pane header (`gtk::Box` containing title label, badge, close button, split buttons, and sync toggle) is encapsulated in `TerminalPane`.
+- **Visibility Methods:**
+  - `pub fn set_header_visible(&self, visible: bool)`: Updates header widget visibility via `self.header.set_visible(visible)`.
+  - `pub fn is_header_visible(&self) -> bool`: Queries `self.header.get_visible()`.
+- **Focus Preservation:** Header action buttons are non-focusable (`set_focusable(false)`), ensuring mouse interactions and visibility state changes never steal focus from the underlying `vte4::Terminal`.
+
+### 17.3 Reactive Dynamic Projection (`SessionView`)
+- **State Encapsulation:** `SessionView` maintains `pane_title_style: Rc<RefCell<PaneTitleStyle>>` and `pane_title_show_when_single: Rc<RefCell<bool>>`, initialized from `AppConfig::load()` upon session creation.
+- **Header Visibility State Machine:**
+  - Evaluated dynamically in `update_pane_headers_visibility(&self)`:
+    - If `pane_title_style == PaneTitleStyle::None`: all pane headers are hidden (`visible = false`).
+    - If `pane_title_style == PaneTitleStyle::Normal`:
+      - If `pane_count <= 1`: `visible = pane_title_show_when_single`.
+      - If `pane_count > 1`: `visible = true`.
+  - Invoked automatically during `rebuild_projection(&self)`, ensuring that pane splits, closures, and resets re-evaluate visibility immediately without widget reparenting or PTY restarts.
+- **Dynamic Setting Mutators:** `pub fn set_pane_title_settings(&self, style: PaneTitleStyle, show_when_single: bool)` updates session-local state and reapplies visibility across all active panes.
+
+### 17.4 Global Broadcast & Preferences Integration
+- **Broadcast Architecture:** `crate::ui::window::apply_pane_title_settings_to_all_sessions(style, show_when_single)` iterates across all active sessions registered in `WIDGET_TO_SESSION`, applying preferences instantly without application restart.
+- **Interactive UI (`AdwPreferencesWindow`):**
+  - "Terminal Title" preferences group on the "Appearance" page.
+  - "Title Style" `adw::ComboRow` mapped to `Normal` (index 0) and `None` (index 1).
+  - "Show title when single terminal" `adw::SwitchRow` bound to `pane_title_show_when_single`.
+  - Changes instantly synchronize to disk (`config.json`) and broadcast to all live sessions.
+
+

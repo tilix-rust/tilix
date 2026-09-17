@@ -8,8 +8,8 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::model::{
-    ColorScheme, Direction, LayoutNode, LayoutTree, PaneId, Profile, SessionModel,
-    SplitOrientation,
+    AppConfig, ColorScheme, Direction, LayoutNode, LayoutTree, PaneId, PaneTitleStyle, Profile,
+    SessionModel, SplitOrientation,
 };
 use crate::ui::terminal_pane::TerminalPane;
 
@@ -32,6 +32,9 @@ pub struct SessionView {
     action_handler: Rc<RefCell<Option<ActionHandler>>>,
     title_changed_callback: Rc<RefCell<Option<TitleChangedHandler>>>,
     swap_handler: Rc<RefCell<Option<SwapHandler>>>,
+    use_wide_handle: Rc<RefCell<bool>>,
+    pane_title_style: Rc<RefCell<PaneTitleStyle>>,
+    pane_title_show_when_single: Rc<RefCell<bool>>,
 }
 
 impl SessionView {
@@ -62,6 +65,10 @@ impl SessionView {
         let action_handler = Rc::new(RefCell::new(None));
         let title_changed_callback = Rc::new(RefCell::new(None));
         let swap_handler = Rc::new(RefCell::new(None));
+        let cfg = AppConfig::load();
+        let use_wide_handle = Rc::new(RefCell::new(cfg.use_wide_handle));
+        let pane_title_style = Rc::new(RefCell::new(cfg.pane_title_style));
+        let pane_title_show_when_single = Rc::new(RefCell::new(cfg.pane_title_show_when_single));
 
         let session = Self {
             container,
@@ -70,15 +77,19 @@ impl SessionView {
             action_handler,
             title_changed_callback,
             swap_handler,
+            use_wide_handle,
+            pane_title_style,
+            pane_title_show_when_single,
         };
 
         let panes_c = Rc::clone(&session.panes);
         let model_c = Rc::clone(&session.model);
         let container_c = session.container.clone();
+        let use_wide_handle_c = Rc::clone(&session.use_wide_handle);
         *session.swap_handler.borrow_mut() = Some(Box::new(move |src, dest| {
             let swapped = model_c.borrow_mut().layout.swap_panes(src, dest).is_ok();
             if swapped {
-                Self::rebuild_projection_with(&container_c, &panes_c, &model_c);
+                Self::rebuild_projection_with(&container_c, &panes_c, &model_c, *use_wide_handle_c.borrow());
             }
         }));
 
@@ -513,10 +524,69 @@ impl SessionView {
         }
     }
 
+    pub fn set_wide_handle(&self, wide: bool) {
+        *self.use_wide_handle.borrow_mut() = wide;
+        let mut child = self.container.first_child();
+        while let Some(c) = child {
+            Self::set_paneds_wide_handle(&c, wide);
+            child = c.next_sibling();
+        }
+    }
+
+    pub fn use_wide_handle(&self) -> bool {
+        *self.use_wide_handle.borrow()
+    }
+
+    pub fn update_pane_headers_visibility(&self) {
+        let count = self.pane_count();
+        let style = *self.pane_title_style.borrow();
+        let show_single = *self.pane_title_show_when_single.borrow();
+        let visible = match style {
+            PaneTitleStyle::None => false,
+            PaneTitleStyle::Normal => {
+                if count <= 1 {
+                    show_single
+                } else {
+                    true
+                }
+            }
+        };
+        for pane in self.panes.borrow().values() {
+            pane.set_header_visible(visible);
+        }
+    }
+
+    pub fn set_pane_title_settings(&self, style: PaneTitleStyle, show_when_single: bool) {
+        *self.pane_title_style.borrow_mut() = style;
+        *self.pane_title_show_when_single.borrow_mut() = show_when_single;
+        self.update_pane_headers_visibility();
+    }
+
+    pub fn pane_title_style(&self) -> PaneTitleStyle {
+        *self.pane_title_style.borrow()
+    }
+
+    pub fn pane_title_show_when_single(&self) -> bool {
+        *self.pane_title_show_when_single.borrow()
+    }
+
+    fn set_paneds_wide_handle(widget: &gtk::Widget, wide: bool) {
+        if let Ok(paned) = widget.clone().downcast::<gtk::Paned>() {
+            paned.set_wide_handle(wide);
+            if let Some(start) = paned.start_child() {
+                Self::set_paneds_wide_handle(&start, wide);
+            }
+            if let Some(end) = paned.end_child() {
+                Self::set_paneds_wide_handle(&end, wide);
+            }
+        }
+    }
+
     fn build_node(
         node: &LayoutNode,
         panes: &HashMap<PaneId, TerminalPane>,
         model: &Rc<RefCell<SessionModel>>,
+        wide_handle: bool,
     ) -> gtk::Widget {
         match node {
             LayoutNode::Leaf(id) => {
@@ -540,14 +610,14 @@ impl SessionView {
                     SplitOrientation::Vertical => gtk::Orientation::Vertical,
                 };
                 let paned = gtk::Paned::new(gtk_orientation);
-                paned.set_wide_handle(true);
+                paned.set_wide_handle(wide_handle);
                 paned.set_shrink_start_child(false);
                 paned.set_shrink_end_child(false);
                 paned.set_resize_start_child(true);
                 paned.set_resize_end_child(true);
 
-                let first_widget = Self::build_node(first, panes, model);
-                let second_widget = Self::build_node(second, panes, model);
+                let first_widget = Self::build_node(first, panes, model, wide_handle);
+                let second_widget = Self::build_node(second, panes, model, wide_handle);
 
                 paned.set_start_child(Some(&first_widget));
                 paned.set_end_child(Some(&second_widget));
@@ -589,6 +659,7 @@ impl SessionView {
         container: &gtk::Box,
         panes: &Rc<RefCell<HashMap<PaneId, TerminalPane>>>,
         model: &Rc<RefCell<SessionModel>>,
+        wide_handle: bool,
     ) {
         let panes_b = panes.borrow();
         for pane in panes_b.values() {
@@ -605,7 +676,7 @@ impl SessionView {
             return;
         };
 
-        let root_widget = Self::build_node(root_node, &panes_b, model);
+        let root_widget = Self::build_node(root_node, &panes_b, model, wide_handle);
         root_widget.set_vexpand(true);
         root_widget.set_hexpand(true);
         container.append(&root_widget);
@@ -626,7 +697,13 @@ impl SessionView {
     }
 
     fn rebuild_projection(&self) {
-        Self::rebuild_projection_with(&self.container, &self.panes, &self.model);
+        Self::rebuild_projection_with(
+            &self.container,
+            &self.panes,
+            &self.model,
+            *self.use_wide_handle.borrow(),
+        );
+        self.update_pane_headers_visibility();
     }
 }
 
@@ -642,9 +719,7 @@ mod tests {
 
     #[test]
     fn test_session_view_lifecycle_and_focus() {
-        if gtk::init().is_err() {
-            return;
-        }
+        crate::ui::window::run_gtk_test(|| {
 
         // Sub-test 1: Basic lifecycle and reset
         {
@@ -769,5 +844,116 @@ mod tests {
             drop(panes_ref);
             session.close();
         }
+
+        // Sub-test 6: Dynamic splitter wide handle toggle
+        {
+            let session = SessionView::new();
+            session.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session.pane_count(), 2);
+
+            session.set_wide_handle(true);
+            assert!(session.use_wide_handle());
+            let child = session.container.first_child().expect("container child exists");
+            let paned = child.downcast::<gtk::Paned>().expect("child should be gtk::Paned");
+            assert!(paned.is_wide_handle());
+
+            session.set_wide_handle(false);
+            assert!(!session.use_wide_handle());
+            assert!(!paned.is_wide_handle());
+
+            session.close();
+        }
+        });
+    }
+
+    #[test]
+    fn test_session_view_set_wide_handle() {
+        crate::ui::window::run_gtk_test(|| {
+            let session = SessionView::new();
+            session.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session.pane_count(), 2);
+
+            session.set_wide_handle(true);
+            assert!(session.use_wide_handle());
+            let child = session.container.first_child().expect("container child exists");
+            let paned = child.downcast::<gtk::Paned>().expect("child should be gtk::Paned");
+            assert!(paned.is_wide_handle());
+
+            session.set_wide_handle(false);
+            assert!(!session.use_wide_handle());
+            assert!(!paned.is_wide_handle());
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_pane_title_none_hides_all_headers() {
+        crate::ui::window::run_gtk_test(|| {
+            let session = SessionView::new();
+            session.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session.pane_count(), 2);
+
+            // By default, PaneTitleStyle::Normal and headers are visible
+            for pane in session.panes().borrow().values() {
+                assert!(pane.is_header_visible());
+            }
+
+            // Set PaneTitleStyle::None -> hides all headers
+            session.set_pane_title_settings(PaneTitleStyle::None, true);
+            assert_eq!(session.pane_title_style(), PaneTitleStyle::None);
+            for pane in session.panes().borrow().values() {
+                assert!(!pane.is_header_visible());
+            }
+
+            // Restore PaneTitleStyle::Normal -> headers visible again (multi-pane)
+            session.set_pane_title_settings(PaneTitleStyle::Normal, true);
+            assert_eq!(session.pane_title_style(), PaneTitleStyle::Normal);
+            for pane in session.panes().borrow().values() {
+                assert!(pane.is_header_visible());
+            }
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_show_when_single_false_dynamic_split() {
+        crate::ui::window::run_gtk_test(|| {
+            let session = SessionView::new();
+            assert_eq!(session.pane_count(), 1);
+
+            // Configure show_when_single = false
+            session.set_pane_title_settings(PaneTitleStyle::Normal, false);
+            assert!(!session.pane_title_show_when_single());
+
+            // 1 pane: header should be hidden
+            for pane in session.panes().borrow().values() {
+                assert!(!pane.is_header_visible());
+            }
+
+            // Split active: now 2 panes, both should have visible headers
+            session.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session.pane_count(), 2);
+            for pane in session.panes().borrow().values() {
+                assert!(pane.is_header_visible());
+            }
+
+            // Close active pane: back to 1 pane, header should be hidden again
+            session.close_active();
+            assert_eq!(session.pane_count(), 1);
+            for pane in session.panes().borrow().values() {
+                assert!(!pane.is_header_visible());
+            }
+
+            // Enable show_when_single = true: single pane header becomes visible
+            session.set_pane_title_settings(PaneTitleStyle::Normal, true);
+            assert!(session.pane_title_show_when_single());
+            for pane in session.panes().borrow().values() {
+                assert!(pane.is_header_visible());
+            }
+
+            session.close();
+        });
     }
 }
