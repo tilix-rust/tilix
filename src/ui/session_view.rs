@@ -406,6 +406,14 @@ impl SessionView {
         }
     }
 
+    pub fn grab_focus(&self) {
+        if let Some(id) = self.model.borrow().active_pane {
+            if let Some(pane) = self.panes.borrow().get(&id) {
+                pane.grab_focus();
+            }
+        }
+    }
+
     pub fn split_active(&self, orientation: SplitOrientation) {
         let active_pane = self.model.borrow().active_pane;
         let target_pane = match active_pane {

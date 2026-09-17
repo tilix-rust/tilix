@@ -241,6 +241,7 @@ impl TilixWindow {
             .borrow_mut()
             .insert(tab_page.clone(), Rc::clone(&session_view));
         tab_view.set_selected_page(&tab_page);
+        session_view.borrow().grab_focus();
 
         (tab_page, session_view)
     }
@@ -330,13 +331,11 @@ impl TilixWindow {
         {
             let action = gio::SimpleAction::new("new-tab", None);
             let tv_weak = self.tab_view.downgrade();
-            let sessions_weak = Rc::downgrade(&self.sessions);
-            let next_id_weak = Rc::downgrade(&self.next_session_id);
+            let sessions = Rc::clone(&self.sessions);
+            let next_id = Rc::clone(&self.next_session_id);
 
             action.connect_activate(move |_, _| {
                 let Some(tv) = tv_weak.upgrade() else { return; };
-                let Some(sessions) = sessions_weak.upgrade() else { return; };
-                let Some(next_id) = next_id_weak.upgrade() else { return; };
 
                 let initial_dir = tv.selected_page().and_then(|page| {
                     sessions.borrow().get(&page).and_then(|s| s.borrow().active_current_directory())
@@ -351,13 +350,12 @@ impl TilixWindow {
         {
             let action = gio::SimpleAction::new("close-pane", None);
             let tab_view_weak = self.tab_view.downgrade();
-            let sessions_weak = Rc::downgrade(&self.sessions);
+            let sessions = Rc::clone(&self.sessions);
             let win_weak = self.window.downgrade();
 
             action.connect_activate(move |_, _| {
                 let Some(tv) = tab_view_weak.upgrade() else { return; };
                 let Some(page) = tv.selected_page() else { return; };
-                let Some(sessions) = sessions_weak.upgrade() else { return; };
 
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
@@ -390,12 +388,11 @@ impl TilixWindow {
         {
             let action = gio::SimpleAction::new("export-session-layout", None);
             let tab_view_weak = self.tab_view.downgrade();
-            let sessions_weak = Rc::downgrade(&self.sessions);
+            let sessions = Rc::clone(&self.sessions);
 
             action.connect_activate(move |_, _| {
                 let Some(tv) = tab_view_weak.upgrade() else { return; };
                 let Some(page) = tv.selected_page() else { return; };
-                let Some(sessions) = sessions_weak.upgrade() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
                     let s = session.borrow();
@@ -423,13 +420,11 @@ impl TilixWindow {
         {
             let action = gio::SimpleAction::new("import-session-layout", None);
             let tv_weak = self.tab_view.downgrade();
-            let sessions_weak = Rc::downgrade(&self.sessions);
-            let next_id_weak = Rc::downgrade(&self.next_session_id);
+            let sessions = Rc::clone(&self.sessions);
+            let next_id = Rc::clone(&self.next_session_id);
 
             action.connect_activate(move |_, _| {
                 let Some(tv) = tv_weak.upgrade() else { return; };
-                let Some(sessions) = sessions_weak.upgrade() else { return; };
-                let Some(next_id) = next_id_weak.upgrade() else { return; };
 
                 let mut template_opt = None;
                 let mut path = glib::user_config_dir();
@@ -487,11 +482,10 @@ impl TilixWindow {
         {
             let action = gio::SimpleAction::new("split-right", None);
             let tab_view_weak = self.tab_view.downgrade();
-            let sessions_weak = Rc::downgrade(&self.sessions);
+            let sessions = Rc::clone(&self.sessions);
             action.connect_activate(move |_, _| {
                 let Some(tv) = tab_view_weak.upgrade() else { return; };
                 let Some(page) = tv.selected_page() else { return; };
-                let Some(sessions) = sessions_weak.upgrade() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
                     session.borrow_mut().split_active(SplitOrientation::Horizontal);
@@ -504,11 +498,10 @@ impl TilixWindow {
         {
             let action = gio::SimpleAction::new("split-down", None);
             let tab_view_weak = self.tab_view.downgrade();
-            let sessions_weak = Rc::downgrade(&self.sessions);
+            let sessions = Rc::clone(&self.sessions);
             action.connect_activate(move |_, _| {
                 let Some(tv) = tab_view_weak.upgrade() else { return; };
                 let Some(page) = tv.selected_page() else { return; };
-                let Some(sessions) = sessions_weak.upgrade() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
                     session.borrow_mut().split_active(SplitOrientation::Vertical);
@@ -521,11 +514,10 @@ impl TilixWindow {
         {
             let action = gio::SimpleAction::new("balance-layout", None);
             let tab_view_weak = self.tab_view.downgrade();
-            let sessions_weak = Rc::downgrade(&self.sessions);
+            let sessions = Rc::clone(&self.sessions);
             action.connect_activate(move |_, _| {
                 let Some(tv) = tab_view_weak.upgrade() else { return; };
                 let Some(page) = tv.selected_page() else { return; };
-                let Some(sessions) = sessions_weak.upgrade() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
                     session.borrow_mut().balance_layout();
@@ -542,7 +534,7 @@ impl TilixWindow {
                 &false.to_variant(),
             );
             let tab_view_weak = self.tab_view.downgrade();
-            let sessions_weak = Rc::downgrade(&self.sessions);
+            let sessions = Rc::clone(&self.sessions);
 
             action.connect_activate(move |act, _| {
                 let current = act.state().and_then(|s| s.get::<bool>()).unwrap_or(false);
@@ -551,7 +543,6 @@ impl TilixWindow {
 
                 let Some(tv) = tab_view_weak.upgrade() else { return; };
                 let Some(page) = tv.selected_page() else { return; };
-                let Some(sessions) = sessions_weak.upgrade() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
                     session.borrow_mut().set_sync_input_enabled(new_state);
@@ -569,6 +560,7 @@ impl TilixWindow {
                 if let Some(session) = session_opt {
                     let is_sync = session.borrow().sync_input_enabled();
                     act.set_state(&is_sync.to_variant());
+                    session.borrow().grab_focus();
                 }
             });
         }
@@ -638,11 +630,10 @@ impl TilixWindow {
         for (name, dir) in directions {
             let action = gio::SimpleAction::new(name, None);
             let tab_view_weak = self.tab_view.downgrade();
-            let sessions_weak = Rc::downgrade(&self.sessions);
+            let sessions = Rc::clone(&self.sessions);
             action.connect_activate(move |_, _| {
                 let Some(tv) = tab_view_weak.upgrade() else { return; };
                 let Some(page) = tv.selected_page() else { return; };
-                let Some(sessions) = sessions_weak.upgrade() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
                     session.borrow_mut().focus_adjacent(dir);
@@ -672,5 +663,72 @@ impl TilixWindow {
         for session in self.sessions.borrow().values() {
             session.borrow().apply_profile(profile);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_window_new_tab_action_after_drop() {
+        if gtk::init().is_err() {
+            return;
+        }
+
+        let app = adw::Application::builder()
+            .application_id("com.github.tilix_rust.test_window_tab")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+
+        let tilix_win = TilixWindow::new(&app);
+        let window = tilix_win.window().clone();
+        let tab_view = tilix_win.tab_view().clone();
+
+        assert_eq!(tab_view.n_pages(), 1);
+
+        // Drop the TilixWindow struct to simulate it leaving scope in connect_activate / connect_command_line
+        drop(tilix_win);
+
+        // Activate win.new-tab action (which the HeaderBar button and Ctrl+Shift+T invoke)
+        let action = window
+            .lookup_action("new-tab")
+            .expect("new-tab action must exist");
+        action.activate(None);
+
+        // Verify that a second tab was created
+        assert_eq!(tab_view.n_pages(), 2);
+
+        // Activate new-tab action again
+        action.activate(None);
+        assert_eq!(tab_view.n_pages(), 3);
+
+        // Test tab navigation
+        let next_action = window
+            .lookup_action("tab-next")
+            .expect("tab-next action must exist");
+        next_action.activate(None);
+
+        let switch_action = window
+            .lookup_action("switch-tab-1")
+            .expect("switch-tab-1 action must exist");
+        switch_action.activate(None);
+
+        // Test split-right on the active tab
+        let split_action = window
+            .lookup_action("split-right")
+            .expect("split-right action must exist");
+        split_action.activate(None);
+
+        // Test close-pane closes split first
+        let close_action = window
+            .lookup_action("close-pane")
+            .expect("close-pane action must exist");
+        close_action.activate(None);
+        assert_eq!(tab_view.n_pages(), 3);
+
+        // Close one of the tabs
+        close_action.activate(None);
+        assert_eq!(tab_view.n_pages(), 2);
     }
 }
