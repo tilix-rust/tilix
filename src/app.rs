@@ -104,15 +104,10 @@ impl TilixApplication {
                         let on_change = move |profile: &crate::model::Profile| {
                             crate::ui::window::apply_profile_to_all_sessions(profile);
                         };
-                        if let Some(active_win) = app.active_window() {
-                            let pref = TilixPreferencesWindow::new(&active_win, on_change);
-                            pref.present();
-                        } else {
-                            let win = TilixWindow::new(app);
-                            win.present();
-                            let pref = TilixPreferencesWindow::new(win.window(), on_change);
-                            pref.present();
-                        }
+                        let active_win = app.active_window();
+                        let pref = TilixPreferencesWindow::new(active_win.as_ref(), on_change);
+                        pref.window().set_application(Some(app));
+                        pref.present();
                     }
                     CliAction::NewWindow => {
                         let win = TilixWindow::new(app);

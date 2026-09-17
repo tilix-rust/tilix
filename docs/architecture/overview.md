@@ -1,8 +1,9 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.6.0 (Phase 6 Final Architecture)  
+**Version:** 0.7.0 (Phase 7 Final Architecture)  
 **Date:** 2026-09-17  
+
 
 ---
 
@@ -344,8 +345,60 @@ Phase 6 implements granular visibility controls for terminal pane header bars an
 - **Keyboard Shortcut & Action:**
   - Window action `win.toggle-tab-bar` toggles `cfg.show_tab_bar`, saves the preference to `config.json`, and broadcasts the change.
   - Default keybindings registered in `setup_accels`: `F12` (classic Tilix session/tab toggle key) and `<Primary><Shift>F12` (non-conflicting modifier shortcut).
-- **Roadmap / Future Milestones:**
-  - Custom Keybinding Manager: Support user-configurable keybindings through a dedicated Shortcuts tab in Preferences.
+- **Roadmap & Phase 7 Completion:**
+  - Phase 7 delivered the Custom Keybinding Manager, replacing static accelerator maps with dynamic configuration-driven binding.
 
+---
 
+## 19. Custom Keybinding Manager & Dynamic Accelerator Architecture
 
+Phase 7 introduces complete user customization of keyboard shortcuts, featuring a headless domain model, accelerator canonicalization, headless collision detection, live runtime rebinding, and a native Libadwaita preference interface with interactive keypress capture.
+
+### 19.1 Headless Domain Model & Action Catalog (`src/model/keybindings.rs`)
+- **Action Categories (`ActionCategory`):**
+  - `SessionAndTabs`: New tab, close pane, close tab, tab switching, previous/next tab.
+  - `SplitsAndLayout`: Split right, split down, balance layout, synchronize input.
+  - `Navigation`: Focus terminal directional navigation (Up, Down, Left, Right).
+  - `ViewAndSettings`: Toggle tab bar, preferences dialog.
+- **Action Catalog (`ACTION_CATALOG`):**
+  - Defines 24 standard actions with action ID, title, description, category, and default accelerators (`&'static [&'static str]`).
+- **Configuration Schema (`KeybindingsConfig`):**
+  - Encapsulates `custom: HashMap<String, String>` where keys are action IDs and values are accelerator strings.
+  - Omitted or default bindings are omitted from the map, ensuring a minimal serialized configuration footprint.
+  - Empty string `""` represents an explicitly disabled / unassigned shortcut.
+- **Resolution API:**
+  - `get_effective_accel(action_id)`: Resolves primary effective accelerator (custom override takes precedence over catalog default).
+  - `get_all_effective_accels(action_id)`: Returns all active accelerator strings (supporting multi-accelerator defaults such as `F12` and `<Primary><Shift>F12`).
+  - `is_customized(action_id)`: Reports whether user overrides exist.
+  - `set_custom_accel`, `reset_action`, and `reset_all`.
+
+### 19.2 Accelerator Normalization & Collision Detection
+- **Pure Rust Normalization (`normalize_accelerator`):**
+  - Parses modifier tokens (`<Primary>`, `<Shift>`, `<Alt>`, `<Super>`) with case-insensitivity.
+  - Canonicalizes modifier aliases (`<Control>` and `<Ctrl>` map to `<Primary>`).
+  - Emits canonical order `<Primary><Shift><Alt><Super>` followed by canonical key representation (e.g. `Up`, `Page_Down`, `F12`).
+  - Zero dependencies on GTK display servers, enabling 100% headless CI testability.
+- **Headless Conflict Detection (`check_conflict`):**
+  - Compares candidate accelerators against all other actions' effective accelerators.
+  - Ignores self-action bindings and empty/disabled shortcuts.
+  - Returns `Option<ConflictInfo>` identifying colliding action ID, title, and accelerator.
+
+### 19.3 Live Dynamic Application Rebinding (`src/ui/window.rs`)
+- **Dynamic Accelerator Dispatch:**
+  - `apply_keybindings_to_app(app, keybindings)`: Iterates over `ACTION_CATALOG` and updates `adw::Application` accelerator maps dynamically via `app.set_accels_for_action`.
+  - `apply_keybindings_globally(keybindings)`: Dispatches accelerator updates across the default application instance without requiring application restart.
+- **Startup Integration:**
+  - `setup_accels(app)` delegates directly to `apply_keybindings_to_app(app, &AppConfig::load().keybindings)`.
+
+### 19.4 Native Libadwaita Preferences UI (`src/ui/preferences.rs`)
+- **"Shortcuts" Page (`adw::PreferencesPage`):**
+  - Icon: `preferences-desktop-keyboard-shortcuts-symbolic`.
+  - Top "Defaults" group with "Reset All Keybindings" action button.
+  - Dedicated `adw::PreferencesGroup` for each `ActionCategory`.
+  - Action rows (`adw::ActionRow`) featuring `gtk::ShortcutLabel` badges, "Edit" button, and contextual "Reset" button (visible only when customized).
+- **Interactive Shortcut Capture Dialog (`ShortcutCaptureDialog`):**
+  - Modal Libadwaita dialog with `gtk::EventControllerKey`.
+  - Filters out standalone modifier keypresses (`Shift`, `Control`, `Alt`, `Super`).
+  - Escape cancels the dialog; Backspace/Delete unbinds the shortcut.
+  - Live preview with real-time conflict checking and warning banners.
+  - "Set" / "Apply" and "Disable Shortcut" actions trigger config saving and global live rebinding.

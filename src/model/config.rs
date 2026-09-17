@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use crate::model::keybindings::KeybindingsConfig;
 use crate::model::Profile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -32,6 +33,7 @@ pub struct AppConfig {
     pub pane_title_style: PaneTitleStyle,
     pub pane_title_show_when_single: bool,
     pub show_tab_bar: bool,
+    pub keybindings: KeybindingsConfig,
 }
 
 impl Default for AppConfig {
@@ -48,6 +50,7 @@ impl Default for AppConfig {
             pane_title_style: PaneTitleStyle::Normal,
             pane_title_show_when_single: true,
             show_tab_bar: true,
+            keybindings: KeybindingsConfig::default(),
         }
     }
 }
@@ -285,4 +288,63 @@ mod tests {
         assert_eq!(config, deserialized);
         assert!(!deserialized.show_tab_bar);
     }
+
+    #[test]
+    fn test_app_config_with_keybindings_defaults() {
+        let config = AppConfig::default();
+        assert!(config.keybindings.custom.is_empty());
+    }
+
+    #[test]
+    fn test_app_config_deserialize_legacy_v6_json() {
+        let legacy_json = r#"{
+            "quake_height_percent": 50,
+            "window_style": "hide_toolbar",
+            "use_wide_handle": true,
+            "pane_title_style": "none",
+            "pane_title_show_when_single": false,
+            "show_tab_bar": false
+        }"#;
+        let config = AppConfig::from_json(legacy_json).expect("deserialize legacy v6 json should succeed");
+        assert_eq!(config.quake_height_percent, 50);
+        assert_eq!(config.window_style, WindowStyle::HideToolbar);
+        assert!(config.use_wide_handle);
+        assert_eq!(config.pane_title_style, PaneTitleStyle::None);
+        assert!(!config.pane_title_show_when_single);
+        assert!(!config.show_tab_bar);
+        assert!(config.keybindings.custom.is_empty());
+        assert_eq!(
+            config.keybindings.get_effective_accel("win.new-tab"),
+            Some("<Primary><Shift>t".to_string())
+        );
+    }
+
+    #[test]
+    fn test_app_config_roundtrip_with_custom_keybindings() {
+        let mut config = AppConfig::default();
+        config.keybindings.set_custom_accel("win.new-tab", "<Primary>t");
+        config.keybindings.set_custom_accel("win.close-tab", "<Primary>w");
+        config.keybindings.set_custom_accel("win.toggle-sync-input", "");
+
+        let json = config.to_json().expect("to_json should succeed");
+        assert!(json.contains("\"win.new-tab\": \"<Primary>t\""));
+        assert!(json.contains("\"win.close-tab\": \"<Primary>w\""));
+        assert!(json.contains("\"win.toggle-sync-input\": \"\""));
+
+        let deserialized = AppConfig::from_json(&json).expect("from_json should succeed");
+        assert_eq!(config, deserialized);
+        assert_eq!(
+            deserialized.keybindings.get_effective_accel("win.new-tab"),
+            Some("<Primary>t".to_string())
+        );
+        assert_eq!(
+            deserialized.keybindings.get_effective_accel("win.close-tab"),
+            Some("<Primary>w".to_string())
+        );
+        assert_eq!(
+            deserialized.keybindings.get_effective_accel("win.toggle-sync-input"),
+            Some("".to_string())
+        );
+    }
 }
+

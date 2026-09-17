@@ -6,8 +6,10 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::model::config::{AppConfig, PaneTitleStyle, WindowStyle};
+use crate::model::keybindings::{ActionCategory, ActionShortcutDef, ACTION_CATALOG};
 use crate::model::profile::{CursorBlinkPreference, CursorShapePreference, Profile};
 use crate::model::theme::ColorScheme;
+
 
 #[allow(deprecated)]
 pub struct TilixPreferencesWindow {
@@ -16,11 +18,19 @@ pub struct TilixPreferencesWindow {
 
 #[allow(deprecated)]
 impl TilixPreferencesWindow {
-    pub fn new<F: Fn(&Profile) + 'static>(parent: &impl IsA<gtk::Window>, on_profile_changed: F) -> Self {
+    pub fn new<W: IsA<gtk::Window>, F: Fn(&Profile) + 'static>(
+        parent: Option<&W>,
+        on_profile_changed: F,
+    ) -> Self {
         let window = adw::PreferencesWindow::new();
-        window.set_transient_for(Some(parent));
-        window.set_modal(true);
+        if let Some(parent) = parent {
+            window.set_transient_for(Some(parent));
+            window.set_modal(true);
+        } else {
+            window.set_modal(false);
+        }
         window.set_title(Some("Preferences"));
+        window.set_default_size(700, 600);
 
         let current_config = Rc::new(RefCell::new(AppConfig::load()));
         let on_change = Rc::new(on_profile_changed);
@@ -346,6 +356,410 @@ impl TilixPreferencesWindow {
             title_show_single_row.connect_active_notify(move |_| s());
         }
 
+        // Shortcuts Page
+        let shortcuts_page = adw::PreferencesPage::new();
+        shortcuts_page.set_title("Shortcuts");
+        shortcuts_page.set_icon_name(Some("preferences-desktop-keyboard-shortcuts-symbolic"));
+
+        #[derive(Clone)]
+        struct ShortcutRowWidgets {
+            action_id: &'static str,
+            shortcut_label: gtk::ShortcutLabel,
+            disabled_label: gtk::Label,
+            reset_btn: gtk::Button,
+        }
+
+        let row_widgets = Rc::new(RefCell::new(Vec::<ShortcutRowWidgets>::new()));
+
+        let refresh_shortcuts_ui = {
+            let current_config = Rc::clone(&current_config);
+            let row_widgets = Rc::clone(&row_widgets);
+            Rc::new(move || {
+                let cfg = current_config.borrow();
+                for item in row_widgets.borrow().iter() {
+                    let effective = cfg
+                        .keybindings
+                        .get_effective_accel(item.action_id)
+                        .unwrap_or_default();
+                    let is_custom = cfg.keybindings.is_customized(item.action_id);
+                    if effective.trim().is_empty() {
+                        item.shortcut_label.set_visible(false);
+                        item.disabled_label.set_visible(true);
+                    } else {
+                        item.shortcut_label.set_accelerator(&effective);
+                        item.shortcut_label.set_visible(true);
+                        item.disabled_label.set_visible(false);
+                    }
+                    item.reset_btn.set_visible(is_custom);
+                }
+            })
+        };
+
+        // Top Defaults Group
+        let top_group = adw::PreferencesGroup::new();
+        top_group.set_title("Defaults");
+        let reset_all_row = adw::ActionRow::new();
+        reset_all_row.set_title("Reset All Keybindings");
+        reset_all_row.set_subtitle("Restore all keyboard shortcuts to application default values");
+        let reset_all_btn = gtk::Button::with_label("Reset All");
+        reset_all_btn.add_css_class("destructive-action");
+        reset_all_btn.set_valign(gtk::Align::Center);
+        reset_all_row.add_suffix(&reset_all_btn);
+        top_group.add(&reset_all_row);
+        shortcuts_page.add(&top_group);
+
+        {
+            let current_config = Rc::clone(&current_config);
+            let refresh = Rc::clone(&refresh_shortcuts_ui);
+            reset_all_btn.connect_clicked(move |_| {
+                current_config.borrow_mut().keybindings.reset_all();
+                let _ = current_config.borrow().save();
+                crate::ui::window::apply_keybindings_globally(&current_config.borrow().keybindings);
+                refresh();
+            });
+        }
+
+        // Category Groups
+        let categories = [
+            ActionCategory::SessionAndTabs,
+            ActionCategory::SplitsAndLayout,
+            ActionCategory::Navigation,
+            ActionCategory::ViewAndSettings,
+        ];
+
+        for category in categories {
+            let cat_group = adw::PreferencesGroup::new();
+            cat_group.set_title(&glib::markup_escape_text(category.title()));
+
+            for def in ACTION_CATALOG.iter().filter(|d| d.category == category) {
+                let row = adw::ActionRow::new();
+                row.set_title(def.title);
+                row.set_subtitle(def.description);
+                row.set_activatable(true);
+
+                let suffix_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                suffix_box.set_valign(gtk::Align::Center);
+
+                let shortcut_label = gtk::ShortcutLabel::new("");
+                let disabled_label = gtk::Label::new(Some("Disabled"));
+                disabled_label.add_css_class("dim-label");
+
+                let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+                edit_btn.set_tooltip_text(Some("Edit shortcut"));
+                edit_btn.add_css_class("flat");
+
+                let reset_btn = gtk::Button::from_icon_name("edit-undo-symbolic");
+                reset_btn.set_tooltip_text(Some("Reset to default"));
+                reset_btn.add_css_class("flat");
+
+                suffix_box.append(&shortcut_label);
+                suffix_box.append(&disabled_label);
+                suffix_box.append(&edit_btn);
+                suffix_box.append(&reset_btn);
+                row.add_suffix(&suffix_box);
+
+                row_widgets.borrow_mut().push(ShortcutRowWidgets {
+                    action_id: def.id,
+                    shortcut_label,
+                    disabled_label,
+                    reset_btn: reset_btn.clone(),
+                });
+
+                // Reset button callback
+                {
+                    let current_config = Rc::clone(&current_config);
+                    let refresh = Rc::clone(&refresh_shortcuts_ui);
+                    let action_id = def.id;
+                    reset_btn.connect_clicked(move |_| {
+                        current_config.borrow_mut().keybindings.reset_action(action_id);
+                        let _ = current_config.borrow().save();
+                        crate::ui::window::apply_keybindings_globally(
+                            &current_config.borrow().keybindings,
+                        );
+                        refresh();
+                    });
+                }
+
+                // Edit button and row activation callback
+                let open_dialog = {
+                    let win_weak = window.downgrade();
+                    let current_config = Rc::clone(&current_config);
+                    let refresh = Rc::clone(&refresh_shortcuts_ui);
+                    let action_def = def;
+                    move || {
+                        let Some(parent_win) = win_weak.upgrade() else { return; };
+                        let effective = current_config
+                            .borrow()
+                            .keybindings
+                            .get_effective_accel(action_def.id)
+                            .unwrap_or_default();
+                        let config_clone = Rc::clone(&current_config);
+                        let refresh_clone = Rc::clone(&refresh);
+                        let action_id = action_def.id;
+                        let dlg = ShortcutCaptureDialog::new(
+                            &parent_win,
+                            action_def,
+                            &effective,
+                            Rc::clone(&current_config),
+                            move |new_accel| {
+                                config_clone
+                                    .borrow_mut()
+                                    .keybindings
+                                    .set_custom_accel(action_id, new_accel);
+                                let _ = config_clone.borrow().save();
+                                crate::ui::window::apply_keybindings_globally(
+                                    &config_clone.borrow().keybindings,
+                                );
+                                refresh_clone();
+                            },
+                        );
+                        dlg.present();
+                    }
+                };
+
+                {
+                    let od = open_dialog.clone();
+                    edit_btn.connect_clicked(move |_| od());
+                }
+                {
+                    let od = open_dialog;
+                    row.connect_activated(move |_| od());
+                }
+
+                cat_group.add(&row);
+            }
+
+            shortcuts_page.add(&cat_group);
+        }
+
+        refresh_shortcuts_ui();
+        window.add(&shortcuts_page);
+
+        Self { window }
+    }
+
+    pub fn window(&self) -> &adw::PreferencesWindow {
+        &self.window
+    }
+
+    pub fn present(&self) {
+        self.window.present();
+    }
+}
+
+#[allow(deprecated)]
+pub struct ShortcutCaptureDialog {
+    window: adw::Window,
+}
+
+#[allow(deprecated)]
+impl ShortcutCaptureDialog {
+    pub fn new<F: Fn(&str) + 'static>(
+
+        parent: &impl IsA<gtk::Window>,
+        def: &'static ActionShortcutDef,
+        current_accel: &str,
+        config: Rc<RefCell<AppConfig>>,
+        on_apply: F,
+    ) -> Self {
+        let window = adw::Window::builder()
+            .title(format!("Set Shortcut — {}", def.title))
+            .modal(true)
+
+            .transient_for(parent)
+            .destroy_with_parent(true)
+            .default_width(440)
+            .default_height(260)
+            .build();
+
+        let header_bar = adw::HeaderBar::new();
+        header_bar.set_show_end_title_buttons(false);
+        header_bar.set_show_start_title_buttons(false);
+
+        let cancel_btn = gtk::Button::with_label("Cancel");
+        header_bar.pack_start(&cancel_btn);
+
+        let apply_btn = gtk::Button::with_label("Set");
+        apply_btn.add_css_class("suggested-action");
+        header_bar.pack_end(&apply_btn);
+
+        let title_widget = adw::WindowTitle::new(
+            &format!("Set Shortcut: {}", def.title),
+            def.description,
+        );
+        header_bar.set_title_widget(Some(&title_widget));
+
+        let main_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        main_box.set_margin_top(16);
+        main_box.set_margin_bottom(16);
+        main_box.set_margin_start(20);
+        main_box.set_margin_end(20);
+
+        let banner = adw::Banner::new("");
+        banner.set_revealed(false);
+        main_box.append(&banner);
+
+        let hint = gtk::Label::new(Some(
+            "Press the desired key combination\n(Escape cancels, Backspace/Delete unbinds)",
+        ));
+        hint.set_justify(gtk::Justification::Center);
+        hint.add_css_class("dim-label");
+        main_box.append(&hint);
+
+        let display_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        display_box.set_halign(gtk::Align::Center);
+        display_box.set_valign(gtk::Align::Center);
+
+        let shortcut_label = gtk::ShortcutLabel::new("");
+        let disabled_label = gtk::Label::new(Some("Disabled"));
+        disabled_label.add_css_class("dim-label");
+        display_box.append(&shortcut_label);
+        display_box.append(&disabled_label);
+        main_box.append(&display_box);
+
+        let disable_btn = gtk::Button::with_label("Disable Shortcut");
+        disable_btn.add_css_class("flat");
+        disable_btn.set_halign(gtk::Align::Center);
+        main_box.append(&disable_btn);
+
+        let content_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content_box.append(&header_bar);
+        content_box.append(&main_box);
+        window.set_content(Some(&content_box));
+
+        let captured_accel = Rc::new(RefCell::new(current_accel.to_string()));
+
+        let update_preview = {
+            let captured_accel = Rc::clone(&captured_accel);
+            let shortcut_label = shortcut_label.clone();
+            let disabled_label = disabled_label.clone();
+            let banner = banner.clone();
+            let config = Rc::clone(&config);
+            let action_id = def.id;
+            Rc::new(move || {
+                let accel = captured_accel.borrow().clone();
+                if accel.trim().is_empty() {
+                    shortcut_label.set_visible(false);
+                    disabled_label.set_visible(true);
+                    banner.set_revealed(false);
+                } else {
+                    shortcut_label.set_accelerator(&accel);
+                    shortcut_label.set_visible(true);
+                    disabled_label.set_visible(false);
+
+                    let conflict = config.borrow().keybindings.check_conflict(action_id, &accel);
+                    if let Some(c) = conflict {
+                        banner.set_title(&format!(
+                            "⚠️ Already assigned to '{}' ({})",
+                            glib::markup_escape_text(&c.action_title),
+                            glib::markup_escape_text(&c.conflicting_accel)
+                        ));
+                        banner.set_revealed(true);
+                    } else {
+                        banner.set_revealed(false);
+                    }
+                }
+            })
+        };
+
+        update_preview();
+
+        // Key Controller
+        let controller = gtk::EventControllerKey::new();
+        {
+            let captured_accel = Rc::clone(&captured_accel);
+            let update_preview = Rc::clone(&update_preview);
+            let win_weak = window.downgrade();
+            controller.connect_key_pressed(move |_, keyval, _keycode, state| {
+                match keyval {
+                    gtk::gdk::Key::Shift_L
+                    | gtk::gdk::Key::Shift_R
+                    | gtk::gdk::Key::Control_L
+                    | gtk::gdk::Key::Control_R
+                    | gtk::gdk::Key::Alt_L
+                    | gtk::gdk::Key::Alt_R
+                    | gtk::gdk::Key::Super_L
+                    | gtk::gdk::Key::Super_R
+                    | gtk::gdk::Key::Meta_L
+                    | gtk::gdk::Key::Meta_R => return glib::Propagation::Proceed,
+                    _ => {}
+                }
+
+                if keyval == gtk::gdk::Key::Escape {
+                    if let Some(win) = win_weak.upgrade() {
+                        win.close();
+                    }
+                    return glib::Propagation::Stop;
+                }
+
+                let is_ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                let is_alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
+                let is_super = state.contains(gtk::gdk::ModifierType::SUPER_MASK);
+
+                if (keyval == gtk::gdk::Key::BackSpace || keyval == gtk::gdk::Key::Delete)
+                    && !is_ctrl
+                    && !is_alt
+                    && !is_super
+                {
+                    *captured_accel.borrow_mut() = String::new();
+                    update_preview();
+                    return glib::Propagation::Stop;
+                }
+
+                let mods = state
+                    & (gtk::gdk::ModifierType::CONTROL_MASK
+                        | gtk::gdk::ModifierType::SHIFT_MASK
+                        | gtk::gdk::ModifierType::ALT_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK);
+                let raw_name = gtk::accelerator_name(keyval, mods);
+                let normalized = crate::model::keybindings::normalize_accelerator(&raw_name);
+                if !normalized.is_empty() {
+                    *captured_accel.borrow_mut() = normalized;
+                    update_preview();
+                }
+
+                glib::Propagation::Stop
+            });
+        }
+        window.add_controller(controller);
+
+        // Cancel
+        {
+            let win_weak = window.downgrade();
+            cancel_btn.connect_clicked(move |_| {
+                if let Some(win) = win_weak.upgrade() {
+                    win.close();
+                }
+            });
+        }
+
+        // Disable
+        let on_apply = Rc::new(on_apply);
+        {
+            let win_weak = window.downgrade();
+            let cb = Rc::clone(&on_apply);
+            disable_btn.connect_clicked(move |_| {
+                cb("");
+                if let Some(win) = win_weak.upgrade() {
+                    win.close();
+                }
+            });
+        }
+
+        // Apply
+        {
+            let win_weak = window.downgrade();
+            let cb = Rc::clone(&on_apply);
+            let captured_accel = Rc::clone(&captured_accel);
+            apply_btn.connect_clicked(move |_| {
+                let accel = captured_accel.borrow().clone();
+                cb(&accel);
+                if let Some(win) = win_weak.upgrade() {
+                    win.close();
+                }
+            });
+        }
+
         Self { window }
     }
 
@@ -353,3 +767,4 @@ impl TilixPreferencesWindow {
         self.window.present();
     }
 }
+

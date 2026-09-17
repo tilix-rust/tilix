@@ -108,27 +108,26 @@ pub fn setup_css() {
 }
 
 pub fn setup_accels(app: &adw::Application) {
-    app.set_accels_for_action("win.new-tab", &["<Primary><Shift>t"]);
-    app.set_accels_for_action("win.close-pane", &["<Primary><Shift>w"]);
-    app.set_accels_for_action("win.tab-next", &["<Primary>Page_Down"]);
-    app.set_accels_for_action("win.tab-prev", &["<Primary>Page_Up"]);
-    app.set_accels_for_action("win.split-right", &["<Primary><Shift>r"]);
-    app.set_accels_for_action("win.split-down", &["<Primary><Shift>d"]);
-    app.set_accels_for_action("win.balance-layout", &["<Primary><Shift>b"]);
-    app.set_accels_for_action("win.toggle-sync-input", &["<Primary><Shift>i"]);
-    app.set_accels_for_action("win.preferences", &["<Primary>comma"]);
-    app.set_accels_for_action("win.focus-up", &["<Alt>Up"]);
-    app.set_accels_for_action("win.focus-down", &["<Alt>Down"]);
-    app.set_accels_for_action("win.focus-left", &["<Alt>Left"]);
-    app.set_accels_for_action("win.focus-right", &["<Alt>Right"]);
-    app.set_accels_for_action("win.toggle-tab-bar", &["F12", "<Primary><Shift>F12"]);
+    let config = crate::model::AppConfig::load();
+    apply_keybindings_to_app(app, &config.keybindings);
+}
 
-    for i in 1..=9 {
-        let action_name = format!("win.switch-tab-{}", i);
-        let accel = format!("<Alt>{}", i);
-        app.set_accels_for_action(&action_name, &[&accel]);
+pub fn apply_keybindings_to_app(app: &adw::Application, keybindings: &crate::model::KeybindingsConfig) {
+    for def in crate::model::ACTION_CATALOG {
+        let accels = keybindings.get_all_effective_accels(def.id);
+        let refs: Vec<&str> = accels.iter().map(|s| s.as_str()).collect();
+        app.set_accels_for_action(def.id, &refs);
     }
 }
+
+pub fn apply_keybindings_globally(keybindings: &crate::model::KeybindingsConfig) {
+    if let Some(app) = gio::Application::default() {
+        if let Ok(adw_app) = app.downcast::<adw::Application>() {
+            apply_keybindings_to_app(&adw_app, keybindings);
+        }
+    }
+}
+
 
 pub struct TilixWindow {
     window: adw::ApplicationWindow,
@@ -536,7 +535,7 @@ impl TilixWindow {
             let win_weak = self.window.downgrade();
             action.connect_activate(move |_, _| {
                 let Some(win) = win_weak.upgrade() else { return; };
-                let pref = TilixPreferencesWindow::new(&win, move |profile| {
+                let pref = TilixPreferencesWindow::new(Some(&win), move |profile| {
                     apply_profile_to_all_sessions(profile);
                 });
                 pref.present();
@@ -954,4 +953,34 @@ mod tests {
             drop(tilix_win);
         });
     }
+
+    #[test]
+    fn test_apply_keybindings_to_app_headless() {
+        run_gtk_test(|| {
+            let app = adw::Application::builder()
+                .application_id("com.github.tilix_rust.test_keybindings")
+                .flags(gio::ApplicationFlags::NON_UNIQUE)
+                .build();
+            let mut keybindings = crate::model::KeybindingsConfig::default();
+            keybindings.set_custom_accel("win.new-tab", "<Primary>t");
+            keybindings.set_custom_accel("win.close-tab", "<Primary>w");
+            apply_keybindings_to_app(&app, &keybindings);
+            apply_keybindings_globally(&keybindings);
+        });
+    }
+
+    #[test]
+    fn test_tilix_preferences_window_standalone_headless() {
+        run_gtk_test(|| {
+            let app = adw::Application::builder()
+                .application_id("com.github.tilix_rust.test_pref_standalone")
+                .flags(gio::ApplicationFlags::NON_UNIQUE)
+                .build();
+            let pref = crate::ui::preferences::TilixPreferencesWindow::new(None::<&gtk::Window>, |_| {});
+            pref.window().set_application(Some(&app));
+            assert!(!pref.window().is_modal());
+            assert_eq!(pref.window().transient_for(), None);
+        });
+    }
 }
+
