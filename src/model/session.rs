@@ -14,6 +14,8 @@ pub struct SessionModel {
     pub sync_input_enabled: bool,
     #[serde(default)]
     pub pane_sync_overrides: HashMap<PaneId, bool>,
+    #[serde(default)]
+    pub focus_history: Vec<PaneId>,
     next_pane_id: u64,
 }
 
@@ -25,6 +27,7 @@ impl SessionModel {
             sync_groups: HashMap::new(),
             sync_input_enabled: false,
             pane_sync_overrides: HashMap::new(),
+            focus_history: vec![initial_pane],
             next_pane_id: initial_pane.0 + 1,
         }
     }
@@ -36,6 +39,7 @@ impl SessionModel {
             sync_groups: HashMap::new(),
             sync_input_enabled: false,
             pane_sync_overrides: HashMap::new(),
+            focus_history: vec![active_pane],
             next_pane_id,
         }
     }
@@ -59,6 +63,18 @@ impl SessionModel {
         self.sync_input_enabled
     }
 
+    pub fn record_focus(&mut self, id: PaneId) {
+        self.focus_history.retain(|&p| p != id);
+        self.focus_history.push(id);
+    }
+
+    pub fn set_active_pane(&mut self, id: PaneId) {
+        if self.layout.contains(id) {
+            self.active_pane = Some(id);
+            self.record_focus(id);
+        }
+    }
+
     pub fn split_pane(
         &mut self,
         target: PaneId,
@@ -66,7 +82,7 @@ impl SessionModel {
     ) -> Result<PaneId, LayoutError> {
         let new_id = self.next_pane_id();
         self.layout.split(target, orientation, new_id)?;
-        self.active_pane = Some(new_id);
+        self.set_active_pane(new_id);
         Ok(new_id)
     }
 
@@ -79,19 +95,30 @@ impl SessionModel {
     }
 
     pub fn close_pane(&mut self, id: PaneId) -> Result<Option<PaneId>, LayoutError> {
-        let next_focus = self.layout.close(id)?;
+        let fallback_focus = self.layout.close(id)?;
         self.sync_groups.remove(&id);
         self.pane_sync_overrides.remove(&id);
+        self.focus_history.retain(|&p| p != id);
+
         if self.active_pane == Some(id) {
+            let next_focus = self
+                .focus_history
+                .last()
+                .copied()
+                .filter(|&p| self.layout.contains(p))
+                .or(fallback_focus);
             self.active_pane = next_focus;
+            Ok(next_focus)
+        } else {
+            // When closing another pane, the active pane remains unchanged
+            Ok(self.active_pane)
         }
-        Ok(next_focus)
     }
 
     pub fn focus_adjacent(&mut self, direction: Direction) -> Option<PaneId> {
         let active = self.active_pane?;
         if let Some(adjacent) = self.layout.find_adjacent(active, direction) {
-            self.active_pane = Some(adjacent);
+            self.set_active_pane(adjacent);
             Some(adjacent)
         } else {
             None
@@ -144,5 +171,136 @@ mod tests {
         // Closing p2 cleans up overrides
         session.close_pane(p2).unwrap();
         assert!(!session.pane_sync_overrides.contains_key(&p2));
+    }
+
+    #[test]
+    fn test_session_focus_history_on_split_and_switch() {
+        let mut session = SessionModel::new(PaneId(1));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        assert_eq!(session.focus_history, vec![PaneId(1)]);
+
+        // Split active (1 -> 2)
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        assert_eq!(session.active_pane, Some(p2));
+        assert_eq!(session.focus_history, vec![PaneId(1), PaneId(2)]);
+
+        // Split active (2 -> 3)
+        let p3 = session.split_active(SplitOrientation::Vertical).unwrap();
+        assert_eq!(session.active_pane, Some(p3));
+        assert_eq!(session.focus_history, vec![PaneId(1), PaneId(2), PaneId(3)]);
+
+        // Switch focus back to 1
+        session.set_active_pane(PaneId(1));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        // 1 moved to the end of MRU history
+        assert_eq!(session.focus_history, vec![PaneId(2), PaneId(3), PaneId(1)]);
+    }
+
+    #[test]
+    fn test_session_close_other_pane_preserves_active_pane() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        let p3 = session.split_active(SplitOrientation::Vertical).unwrap();
+
+        // Switch focus to 1
+        session.set_active_pane(PaneId(1));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        assert_eq!(session.focus_history, vec![p2, p3, PaneId(1)]);
+
+        // Close pane 2 (not active)
+        let res = session.close_pane(p2).unwrap();
+        assert_eq!(res, Some(PaneId(1)));
+        // Active pane is STILL pane 1!
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        // p2 is removed from history
+        assert_eq!(session.focus_history, vec![p3, PaneId(1)]);
+
+        // Close pane 3 (not active)
+        let res2 = session.close_pane(p3).unwrap();
+        assert_eq!(res2, Some(PaneId(1)));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        assert_eq!(session.focus_history, vec![PaneId(1)]);
+    }
+
+    #[test]
+    fn test_session_close_active_pane_restores_previous_pane() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        let p3 = session.split_active(SplitOrientation::Vertical).unwrap();
+
+        // History is [1, 2, 3], active is 3
+        assert_eq!(session.active_pane, Some(p3));
+
+        // Closing current pane 3 should automatically move focus to previous pane 2
+        let next = session.close_pane(p3).unwrap();
+        assert_eq!(next, Some(p2));
+        assert_eq!(session.active_pane, Some(p2));
+        assert_eq!(session.focus_history, vec![PaneId(1), p2]);
+
+        // Closing current pane 2 should move focus to previous pane 1
+        let next2 = session.close_pane(p2).unwrap();
+        assert_eq!(next2, Some(PaneId(1)));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        assert_eq!(session.focus_history, vec![PaneId(1)]);
+
+        // Closing last pane 1 returns None
+        let next3 = session.close_pane(PaneId(1)).unwrap();
+        assert_eq!(next3, None);
+        assert_eq!(session.active_pane, None);
+        assert!(session.focus_history.is_empty());
+    }
+
+    #[test]
+    fn test_session_focus_history_mru_ordering() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        let p3 = session.split_active(SplitOrientation::Vertical).unwrap();
+
+        // Visit sequence: 1 -> 2 -> 3 -> switch to 1 -> switch to 2
+        session.set_active_pane(PaneId(1));
+        session.set_active_pane(p2);
+        // MRU order is now: [3, 1, 2]
+        assert_eq!(session.focus_history, vec![p3, PaneId(1), p2]);
+        assert_eq!(session.active_pane, Some(p2));
+
+        // Closing current pane 2 should move focus to previous pane 1 (the one active before 2)
+        let next = session.close_pane(p2).unwrap();
+        assert_eq!(next, Some(PaneId(1)));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+
+        // Closing current pane 1 should move focus to pane 3
+        let next2 = session.close_pane(PaneId(1)).unwrap();
+        assert_eq!(next2, Some(p3));
+        assert_eq!(session.active_pane, Some(p3));
+    }
+
+    #[test]
+    fn test_session_focus_adjacent_records_history() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        assert_eq!(session.active_pane, Some(p2));
+
+        // Navigate left from p2 to pane 1
+        let adjacent = session.focus_adjacent(Direction::Left);
+        assert_eq!(adjacent, Some(PaneId(1)));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        assert_eq!(session.focus_history, vec![p2, PaneId(1)]);
+    }
+
+    #[test]
+    fn test_session_serialization_backwards_compatibility() {
+        // Old json without focus_history field
+        let json = r#"{
+            "layout": {"Leaf": 1},
+            "active_pane": 1,
+            "sync_groups": {},
+            "sync_input_enabled": false,
+            "pane_sync_overrides": {},
+            "next_pane_id": 2
+        }"#;
+
+        let session: SessionModel = serde_json::from_str(json).unwrap();
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        assert!(session.focus_history.is_empty());
     }
 }

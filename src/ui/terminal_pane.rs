@@ -25,6 +25,9 @@ pub struct TerminalPane {
     header: gtk::Box,
     title_label: gtk::Label,
     sync_btn: gtk::ToggleButton,
+    split_h_btn: gtk::Button,
+    split_v_btn: gtk::Button,
+    close_btn: gtk::Button,
     terminal: vte::Terminal,
     pane_id: PaneId,
     current_directory: Rc<RefCell<Option<PathBuf>>>,
@@ -65,18 +68,22 @@ impl TerminalPane {
         sync_btn.set_tooltip_text(Some("Synchronize Input"));
         sync_btn.add_css_class("flat");
         sync_btn.set_active(true);
+        sync_btn.set_focusable(false);
 
         let split_h_btn = gtk::Button::from_icon_name("object-flip-horizontal-symbolic");
         split_h_btn.set_tooltip_text(Some("Split Right (Ctrl+Shift+R)"));
         split_h_btn.add_css_class("flat");
+        split_h_btn.set_focusable(false);
 
         let split_v_btn = gtk::Button::from_icon_name("object-flip-vertical-symbolic");
         split_v_btn.set_tooltip_text(Some("Split Down (Ctrl+Shift+D)"));
         split_v_btn.add_css_class("flat");
+        split_v_btn.set_focusable(false);
 
         let close_btn = gtk::Button::from_icon_name("window-close-symbolic");
         close_btn.set_tooltip_text(Some("Close Pane (Ctrl+Shift+W)"));
         close_btn.add_css_class("flat");
+        close_btn.set_focusable(false);
 
         header.append(&sync_btn);
         header.append(&split_h_btn);
@@ -88,6 +95,16 @@ impl TerminalPane {
         terminal.set_vexpand(true);
         terminal.set_hexpand(true);
         terminal.set_can_focus(true);
+
+        // Wire click gesture on header to focus terminal
+        {
+            let term_ref = terminal.clone();
+            let click_gesture = gtk::GestureClick::new();
+            click_gesture.connect_pressed(move |_gesture, _n, _x, _y| {
+                term_ref.grab_focus();
+            });
+            header.add_controller(click_gesture);
+        }
 
         container.append(&header);
         container.append(&terminal);
@@ -273,6 +290,9 @@ impl TerminalPane {
             header,
             title_label,
             sync_btn,
+            split_h_btn,
+            split_v_btn,
+            close_btn,
             terminal,
             pane_id,
             current_directory,
@@ -287,6 +307,22 @@ impl TerminalPane {
             bell_callbacks,
             child_exit_callbacks,
         }
+    }
+
+    pub fn close_button(&self) -> &gtk::Button {
+        &self.close_btn
+    }
+
+    pub fn split_h_button(&self) -> &gtk::Button {
+        &self.split_h_btn
+    }
+
+    pub fn split_v_button(&self) -> &gtk::Button {
+        &self.split_v_btn
+    }
+
+    pub fn sync_button(&self) -> &gtk::ToggleButton {
+        &self.sync_btn
     }
 
     pub fn pane_id(&self) -> PaneId {

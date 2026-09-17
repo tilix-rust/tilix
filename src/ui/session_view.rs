@@ -148,8 +148,29 @@ impl SessionView {
             }
         });
 
+        let panes_focus = panes.clone();
+        let model_focus = Rc::clone(model);
+        let title_cb_focus = Rc::clone(title_changed_callback);
         let handler_focus = Rc::clone(action_handler);
         pane.connect_focus(move |p_id| {
+            if let Ok(panes) = panes_focus.try_borrow() {
+                if panes.contains_key(&p_id) {
+                    if let Ok(mut m) = model_focus.try_borrow_mut() {
+                        m.set_active_pane(p_id);
+                    }
+                    for (id, p) in panes.iter() {
+                        p.set_active(*id == p_id);
+                    }
+                    if let Some(p) = panes.get(&p_id) {
+                        let title = p.title();
+                        if let Ok(cb_ref) = title_cb_focus.try_borrow() {
+                            if let Some(ref cb) = *cb_ref {
+                                cb(&title);
+                            }
+                        }
+                    }
+                }
+            }
             if let Ok(h) = handler_focus.try_borrow() {
                 if let Some(cb) = h.as_ref() {
                     cb(SessionAction::Focus(p_id));
@@ -357,14 +378,12 @@ impl SessionView {
     pub fn set_active_pane(&self, id: PaneId) {
         let panes = self.panes.borrow();
         if panes.contains_key(&id) {
-            self.model.borrow_mut().active_pane = Some(id);
+            self.model.borrow_mut().set_active_pane(id);
             for (pane_id, pane) in panes.iter() {
                 pane.set_active(*pane_id == id);
             }
             if let Some(pane) = panes.get(&id) {
-                if !pane.terminal().has_focus() {
-                    pane.grab_focus();
-                }
+                pane.grab_focus();
                 let title = pane.title();
                 if let Some(ref cb) = *self.title_changed_callback.borrow() {
                     cb(&title);
@@ -393,7 +412,7 @@ impl SessionView {
             Some(id) if self.panes.borrow().contains_key(&id) => id,
             _ => {
                 if let Some(&first_id) = self.panes.borrow().keys().next() {
-                    self.model.borrow_mut().active_pane = Some(first_id);
+                    self.model.borrow_mut().set_active_pane(first_id);
                     first_id
                 } else {
                     return;
@@ -429,6 +448,7 @@ impl SessionView {
             );
             self.panes.borrow_mut().insert(new_id, new_pane);
             self.rebuild_projection();
+            self.set_active_pane(new_id);
         }
     }
 
@@ -453,6 +473,10 @@ impl SessionView {
                 Self::detach_widget(w);
             }
             self.rebuild_projection();
+            let next_active = self.model.borrow().active_pane;
+            if let Some(act_id) = next_active {
+                self.set_active_pane(act_id);
+            }
         }
     }
 
@@ -581,9 +605,13 @@ impl SessionView {
         drop(model_b);
         drop(panes_b);
 
+        let panes_ref = panes.borrow();
+        for (pane_id, pane) in panes_ref.iter() {
+            pane.set_active(Some(*pane_id) == active_id);
+        }
         if let Some(id) = active_id {
-            if let Some(pane) = panes.borrow().get(&id) {
-                pane.set_active(true);
+            if let Some(pane) = panes_ref.get(&id) {
+                pane.grab_focus();
             }
         }
     }
@@ -604,25 +632,133 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_session_view_close_pane_and_reset_no_panic() {
+    fn test_session_view_lifecycle_and_focus() {
         if gtk::init().is_err() {
             return;
         }
 
-        let session = SessionView::new();
-        assert_eq!(session.pane_count(), 1);
-        let active_id = session.active_pane_id().unwrap();
+        // Sub-test 1: Basic lifecycle and reset
+        {
+            let session = SessionView::new();
+            assert_eq!(session.pane_count(), 1);
+            let active_id = session.active_pane_id().unwrap();
 
-        session.split_active(SplitOrientation::Horizontal);
-        assert_eq!(session.pane_count(), 2);
+            session.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session.pane_count(), 2);
 
-        session.close_pane(active_id);
-        assert_eq!(session.pane_count(), 1);
+            session.close_pane(active_id);
+            assert_eq!(session.pane_count(), 1);
 
-        session.reset();
-        assert_eq!(session.pane_count(), 1);
+            session.reset();
+            assert_eq!(session.pane_count(), 1);
 
-        session.close();
-        assert!(session.is_empty());
+            session.close();
+            assert!(session.is_empty());
+        }
+
+        // Sub-test 2: Closing another pane does NOT cause current pane to lose focus
+        {
+            let session = SessionView::new();
+            assert_eq!(session.pane_count(), 1);
+            let p1 = session.active_pane_id().unwrap();
+
+            session.split_active(SplitOrientation::Horizontal);
+            let p2 = session.active_pane_id().unwrap();
+            assert_ne!(p1, p2);
+
+            session.split_active(SplitOrientation::Vertical);
+            let p3 = session.active_pane_id().unwrap();
+            assert_ne!(p2, p3);
+
+            // Switch active back to p1
+            session.set_active_pane(p1);
+            assert_eq!(session.active_pane_id(), Some(p1));
+
+            // Close pane 2 (another pane, not the active one)
+            session.close_pane(p2);
+            assert_eq!(session.pane_count(), 2);
+            // Current active pane MUST NOT lose focus / must remain active!
+            assert_eq!(session.active_pane_id(), Some(p1));
+
+            // Close pane 3 (another pane, not the active one)
+            session.close_pane(p3);
+            assert_eq!(session.pane_count(), 1);
+            // Current active pane MUST NOT lose focus / must remain active!
+            assert_eq!(session.active_pane_id(), Some(p1));
+
+            session.close();
+        }
+
+        // Sub-test 3: Closing active pane automatically moves focus to previous pane
+        {
+            let session = SessionView::new();
+            let p1 = session.active_pane_id().unwrap();
+
+            session.split_active(SplitOrientation::Horizontal);
+            let p2 = session.active_pane_id().unwrap();
+
+            session.split_active(SplitOrientation::Vertical);
+            let p3 = session.active_pane_id().unwrap();
+
+            // Currently active pane is p3
+            assert_eq!(session.active_pane_id(), Some(p3));
+
+            // Close active pane p3: focus must automatically move to previous pane p2
+            session.close_pane(p3);
+            assert_eq!(session.pane_count(), 2);
+            assert_eq!(session.active_pane_id(), Some(p2));
+
+            // Close active pane p2: focus must automatically move to previous pane p1
+            session.close_pane(p2);
+            assert_eq!(session.pane_count(), 1);
+            assert_eq!(session.active_pane_id(), Some(p1));
+
+            session.close();
+        }
+
+        // Sub-test 4: Closing active pane with MRU history switch
+        {
+            let session = SessionView::new();
+            let p1 = session.active_pane_id().unwrap();
+
+            session.split_active(SplitOrientation::Horizontal);
+            let p2 = session.active_pane_id().unwrap();
+
+            session.split_active(SplitOrientation::Vertical);
+            let p3 = session.active_pane_id().unwrap();
+
+            // Switch to p1: MRU order becomes [p2, p3, p1]
+            session.set_active_pane(p1);
+            assert_eq!(session.active_pane_id(), Some(p1));
+
+            // Closing current pane p1 must automatically move focus to previous pane p3
+            session.close_pane(p1);
+            assert_eq!(session.pane_count(), 2);
+            assert_eq!(session.active_pane_id(), Some(p3));
+
+            // Closing current pane p3 must automatically move focus to previous pane p2
+            session.close_pane(p3);
+            assert_eq!(session.pane_count(), 1);
+            assert_eq!(session.active_pane_id(), Some(p2));
+
+            session.close();
+        }
+
+        // Sub-test 5: Terminal pane header buttons are not focusable to prevent stealing focus on click
+        {
+            let session = SessionView::new();
+            let active_id = session.active_pane_id().unwrap();
+            let panes = session.panes();
+            let panes_ref = panes.borrow();
+            let pane = panes_ref.get(&active_id).unwrap();
+
+            assert!(!pane.close_button().is_focusable());
+            assert!(!pane.split_h_button().is_focusable());
+            assert!(!pane.split_v_button().is_focusable());
+            assert!(!pane.sync_button().is_focusable());
+
+            drop(panes_ref);
+            session.close();
+        }
     }
 }
