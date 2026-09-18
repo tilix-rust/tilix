@@ -1001,6 +1001,7 @@ impl SessionView {
                 let second_widget = Self::build_node(second, panes, model, container, wide_handle, child2_w, child2_h);
 
                 let paned = gtk::Paned::new(gtk_orientation);
+                paned.set_widget_name(&format!("split-{}", id.0));
                 paned.set_wide_handle(wide_handle);
                 paned.set_shrink_start_child(false);
                 paned.set_shrink_end_child(false);
@@ -1077,7 +1078,6 @@ impl SessionView {
                 let is_dragging = Rc::new(std::cell::Cell::new(false));
                 let just_equalized = Rc::new(std::cell::Cell::new(false));
                 let split_id = *id;
-                let model_clone = Rc::clone(model);
 
                 let container_weak = container.downgrade();
                 let paned_weak = paned.downgrade();
@@ -1085,28 +1085,52 @@ impl SessionView {
                 let just_eq_action = Rc::clone(&just_equalized);
                 let equalize_action = Rc::new(move || {
                     just_eq_action.set(true);
-                    if let Ok(mut m) = model_for_equalize.try_borrow_mut() {
-                        m.layout.equalize_split(split_id);
-                    }
+                    // 1. Capture current live ratios from widgets before equalizing
                     if let Some(container) = container_weak.upgrade() {
-                        let w = container.width();
-                        let h = container.height();
-                        let model_b = model_for_equalize.borrow();
-                        if let Some(root_node) = model_b.layout.root() {
-                            if let Some(root_widget) = container.first_child() {
-                                Self::apply_ratios_recursive(root_node, &root_widget, w, h);
-                                let root_clone = root_node.clone();
-                                let rw_weak = root_widget.downgrade();
-                                let just_eq_idle = Rc::clone(&just_eq_action);
-                                glib::idle_add_local_once(move || {
-                                    if let Some(rw) = rw_weak.upgrade() {
-                                        Self::apply_ratios_recursive(&root_clone, &rw, w, h);
-                                    }
-                                    just_eq_idle.set(false);
-                                });
+                        if let Some(root_widget) = container.first_child() {
+                            if let Ok(mut m) = model_for_equalize.try_borrow_mut() {
+                                if let Some(root_node) = m.layout.root_mut() {
+                                    Self::capture_ratios_recursive(root_node, &root_widget);
+                                }
                             }
                         }
                     }
+
+                    // 2. Equalize split cluster in model
+                    let cluster_root_id = if let Ok(mut m) = model_for_equalize.try_borrow_mut() {
+                        m.layout.equalize_split(split_id)
+                    } else {
+                        None
+                    };
+
+                    // 3. Apply ratios ONLY to the equalized cluster
+                    if let Some(root_id) = cluster_root_id {
+                        if let Some(container) = container_weak.upgrade() {
+                            if let Some(cluster_paned) = Self::find_paned_by_split_id(&container, root_id) {
+                                let m = model_for_equalize.borrow();
+                                if let Some(node) = m.layout.find_split_node(root_id) {
+                                    if let Some(orientation) = m.layout.find_split_orientation(root_id) {
+                                        let w = cluster_paned.width();
+                                        let h = cluster_paned.height();
+                                        Self::apply_cluster_ratios(node, cluster_paned.upcast_ref(), orientation, w, h);
+                                        let node_clone = node.clone();
+                                        let p_weak = cluster_paned.downgrade();
+                                        let just_eq_idle = Rc::clone(&just_eq_action);
+                                        glib::idle_add_local_once(move || {
+                                            if let Some(p) = p_weak.upgrade() {
+                                                let w = p.width();
+                                                let h = p.height();
+                                                Self::apply_cluster_ratios(&node_clone, p.upcast_ref(), orientation, w, h);
+                                            }
+                                            just_eq_idle.set(false);
+                                        });
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    just_eq_action.set(false);
                 });
 
                 let last_click_time = Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
@@ -1172,22 +1196,20 @@ impl SessionView {
                 }
 
                 let just_eq_notify = Rc::clone(&just_equalized);
-                let is_dragging_notify = Rc::clone(&is_dragging);
+                let model_clone_notify = Rc::clone(model);
                 paned.connect_notify_local(Some("position"), move |p, _| {
                     if just_eq_notify.get() {
                         return;
                     }
-                    if is_dragging_notify.get() {
-                        let len = match p.orientation() {
-                            gtk::Orientation::Horizontal => p.width(),
-                            gtk::Orientation::Vertical => p.height(),
-                            _ => p.width(),
-                        };
-                        if len > 0 && p.position() > 0 {
-                            let ratio = (p.position() as f64 / len as f64).clamp(0.05, 0.95);
-                            if let Ok(mut m) = model_clone.try_borrow_mut() {
-                                m.layout.set_split_ratio(split_id, ratio);
-                            }
+                    let len = match p.orientation() {
+                        gtk::Orientation::Horizontal => p.width(),
+                        gtk::Orientation::Vertical => p.height(),
+                        _ => p.width(),
+                    };
+                    if len > 0 && p.position() > 0 {
+                        let ratio = (p.position() as f64 / len as f64).clamp(0.05, 0.95);
+                        if let Ok(mut m) = model_clone_notify.try_borrow_mut() {
+                            m.layout.set_split_ratio(split_id, ratio);
                         }
                     }
                 });
@@ -1291,25 +1313,103 @@ impl SessionView {
         }
     }
 
-    pub fn equalize_split(&self, split_id: SplitId) {
-        if let Ok(mut m) = self.model.try_borrow_mut() {
-            m.layout.equalize_split(split_id);
+    fn find_paned_by_split_id(widget: &impl glib::object::IsA<gtk::Widget>, split_id: SplitId) -> Option<gtk::Paned> {
+        let w = widget.as_ref();
+        let target_name = format!("split-{}", split_id.0);
+        if w.widget_name() == target_name {
+            if let Some(p) = w.downcast_ref::<gtk::Paned>() {
+                return Some(p.clone());
+            }
         }
-        self.apply_layout_ratios();
-        let model_clone = Rc::clone(&self.model);
-        let container_weak = self.container.downgrade();
-        glib::idle_add_local_once(move || {
-            if let Some(container) = container_weak.upgrade() {
-                let w = container.width();
-                let h = container.height();
-                let model_b = model_clone.borrow();
-                if let Some(root_node) = model_b.layout.root() {
-                    if let Some(root_widget) = container.first_child() {
-                        Self::apply_ratios_recursive(root_node, &root_widget, w, h);
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            if let Some(found) = Self::find_paned_by_split_id(&c, split_id) {
+                return Some(found);
+            }
+            child = c.next_sibling();
+        }
+        None
+    }
+
+    fn apply_cluster_ratios(
+        node: &LayoutNode,
+        widget: &gtk::Widget,
+        target_orientation: SplitOrientation,
+        avail_w: i32,
+        avail_h: i32,
+    ) {
+        if let LayoutNode::Split {
+            orientation,
+            ratio,
+            first,
+            second,
+            ..
+        } = node
+        {
+            if *orientation != target_orientation {
+                return;
+            }
+            if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
+                let is_horiz = *orientation == SplitOrientation::Horizontal;
+                let len = match orientation {
+                    SplitOrientation::Horizontal => {
+                        if paned.width() > 0 { paned.width() } else { avail_w }
                     }
+                    SplitOrientation::Vertical => {
+                        if paned.height() > 0 { paned.height() } else { avail_h }
+                    }
+                };
+                let pos = if len > 0 {
+                    let p = (len as f64 * *ratio).round() as i32;
+                    paned.set_position(p);
+                    p
+                } else {
+                    paned.position()
+                };
+
+                let (c1_w, c1_h, c2_w, c2_h) = if is_horiz {
+                    (pos, avail_h, (avail_w - pos).max(0), avail_h)
+                } else {
+                    (avail_w, pos, avail_w, (avail_h - pos).max(0))
+                };
+
+                if let Some(c1) = paned.start_child() {
+                    Self::apply_cluster_ratios(first, &c1, target_orientation, c1_w, c1_h);
+                }
+                if let Some(c2) = paned.end_child() {
+                    Self::apply_cluster_ratios(second, &c2, target_orientation, c2_w, c2_h);
                 }
             }
-        });
+        }
+    }
+
+    pub fn equalize_split(&self, split_id: SplitId) {
+        self.capture_layout_ratios();
+        let cluster_root_id = if let Ok(mut m) = self.model.try_borrow_mut() {
+            m.layout.equalize_split(split_id)
+        } else {
+            None
+        };
+        let Some(root_id) = cluster_root_id else { return; };
+        if let Some(paned) = Self::find_paned_by_split_id(&self.container, root_id) {
+            let m = self.model.borrow();
+            if let Some(node) = m.layout.find_split_node(root_id) {
+                if let Some(orientation) = m.layout.find_split_orientation(root_id) {
+                    let w = paned.width();
+                    let h = paned.height();
+                    Self::apply_cluster_ratios(node, paned.upcast_ref(), orientation, w, h);
+                    let node_clone = node.clone();
+                    let paned_weak = paned.downgrade();
+                    glib::idle_add_local_once(move || {
+                        if let Some(p) = paned_weak.upgrade() {
+                            let w = p.width();
+                            let h = p.height();
+                            Self::apply_cluster_ratios(&node_clone, p.upcast_ref(), orientation, w, h);
+                        }
+                    });
+                }
+            }
+        }
     }
 
     pub fn equalize_direction(&self, orientation: SplitOrientation) {
@@ -2142,4 +2242,121 @@ mod tests {
             session.close();
         });
     }
+
+    #[test]
+    fn test_equalize_split_nested_de_isolation_in_session_view() {
+        crate::ui::window::run_gtk_test(|| {
+            let mut model = SessionModel::new(PaneId(1));
+            // 1. Split Right (A | B) -> SplitId(1) (Horizontal)
+            model.split_pane(PaneId(1), SplitOrientation::Horizontal).unwrap();
+            // 2. Split Right (B | C) -> SplitId(2) (Horizontal)
+            model.split_pane(PaneId(2), SplitOrientation::Horizontal).unwrap();
+            // 3. Split Down (C / D) -> SplitId(3) (Vertical)
+            model.split_pane(PaneId(3), SplitOrientation::Vertical).unwrap();
+            // 4. Split Right (D | E) -> SplitId(4) (Horizontal)
+            model.split_pane(PaneId(4), SplitOrientation::Horizontal).unwrap();
+
+            // Set custom ratios
+            model.layout.set_split_ratio(SplitId(1), 0.2); // A gets 20%
+            model.layout.set_split_ratio(SplitId(2), 0.7);
+            model.layout.set_split_ratio(SplitId(3), 0.6);
+            model.layout.set_split_ratio(SplitId(4), 0.1); // D gets 10%
+
+            let session = SessionView::with_model_and_dir(model, None);
+
+            // Double-click D | E separator (SplitId 4)
+            session.equalize_split(SplitId(4));
+
+            {
+                let m = session.model();
+                if let Some(LayoutNode::Split { ratio: r1, second, .. }) = m.layout.root() {
+                    // Split 1 MUST REMAIN 0.2
+                    assert!((r1 - 0.2).abs() < 1e-6, "Split 1 should remain 0.2, got {}", r1);
+                    if let LayoutNode::Split { ratio: r2, second: s2, .. } = &**second {
+                        // Split 2 MUST REMAIN 0.7
+                        assert!((r2 - 0.7).abs() < 1e-6, "Split 2 should remain 0.7, got {}", r2);
+                        if let LayoutNode::Split { ratio: r3, second: s3, .. } = &**s2 {
+                            // Split 3 MUST REMAIN 0.6
+                            assert!((r3 - 0.6).abs() < 1e-6, "Split 3 should remain 0.6, got {}", r3);
+                            if let LayoutNode::Split { ratio: r4, .. } = &**s3 {
+                                // Split 4 (D | E) MUST BE EQUALIZED TO 0.5!
+                                assert!((r4 - 0.5).abs() < 1e-6, "Split 4 should be 0.5, got {}", r4);
+                            } else {
+                                panic!("Expected Split 4");
+                            }
+                        } else {
+                            panic!("Expected Split 3");
+                        }
+                    } else {
+                        panic!("Expected Split 2");
+                    }
+                } else {
+                    panic!("Expected root");
+                }
+            }
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_drag_ab_then_double_click_de_preserves_ab_ratio() {
+        crate::ui::window::run_gtk_test(|| {
+            crate::ui::window::setup_css();
+            let mut model = SessionModel::new(PaneId(1));
+            // Split Right -> Split Right -> Split Down -> Split Right
+            model.split_pane(PaneId(1), SplitOrientation::Horizontal).unwrap();
+            model.split_pane(PaneId(2), SplitOrientation::Horizontal).unwrap();
+            model.split_pane(PaneId(3), SplitOrientation::Vertical).unwrap();
+            model.split_pane(PaneId(4), SplitOrientation::Horizontal).unwrap();
+
+            let session = SessionView::with_model_and_dir(model, None);
+            let window = gtk::Window::new();
+            window.set_default_size(800, 600);
+            window.set_child(Some(session.widget()));
+            window.present();
+
+            let ctx = glib::MainContext::default();
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
+
+            // Find Paned 1 (A | B)
+            let paned_1 = SessionView::find_paned_by_split_id(&session.container, SplitId(1))
+                .expect("Paned 1 must exist");
+
+            // User manually adjusts A and B divider to position 150
+            paned_1.set_position(150);
+
+            for _ in 0..5 {
+                ctx.iteration(false);
+            }
+
+            // Paned 1 position is now 150
+            assert_eq!(paned_1.position(), 150);
+
+            // Now double-click or equalize SplitId(4) (D | E)
+            session.equalize_split(SplitId(4));
+
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
+
+            // Paned 1 position MUST STILL BE 150, NOT RESET!
+            assert_eq!(paned_1.position(), 150, "Paned 1 position must not be reset after equalizing D and E");
+
+            // Paned 4 (D | E) should be equalized (50%)
+            let paned_4 = SessionView::find_paned_by_split_id(&session.container, SplitId(4))
+                .expect("Paned 4 must exist");
+            let p4_len = paned_4.width();
+            if p4_len > 0 {
+                let p4_ratio = paned_4.position() as f64 / p4_len as f64;
+                assert!((p4_ratio - 0.5).abs() < 0.05, "Paned 4 ratio should be ~0.5, got {}", p4_ratio);
+            }
+
+            session.close();
+        });
+    }
 }
+
+

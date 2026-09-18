@@ -289,6 +289,26 @@ impl LayoutNode {
         }
     }
 
+    pub fn find_split_node(&self, target_id: SplitId) -> Option<&LayoutNode> {
+        match self {
+            LayoutNode::Leaf(_) => None,
+            LayoutNode::Split {
+                id,
+                first,
+                second,
+                ..
+            } => {
+                if *id == target_id {
+                    Some(self)
+                } else {
+                    first
+                        .find_split_node(target_id)
+                        .or_else(|| second.find_split_node(target_id))
+                }
+            }
+        }
+    }
+
     pub fn contains_split(&self, target_id: SplitId) -> bool {
         match self {
             LayoutNode::Leaf(_) => false,
@@ -305,33 +325,58 @@ impl LayoutNode {
         }
     }
 
-    pub fn equalize_split_cluster(
-        &mut self,
+    pub fn contains_split_contiguous(
+        &self,
         target_id: SplitId,
         target_orientation: SplitOrientation,
     ) -> bool {
         match self {
             LayoutNode::Leaf(_) => false,
             LayoutNode::Split {
+                id,
                 orientation,
                 first,
                 second,
                 ..
             } => {
-                if *orientation == target_orientation {
-                    if self.contains_split(target_id) {
-                        self.equalize_cluster(target_orientation);
-                        return true;
-                    }
+                if *orientation != target_orientation {
+                    false
+                } else if *id == target_id {
+                    true
                 } else {
-                    if first.contains_split(target_id) {
-                        return first.equalize_split_cluster(target_id, target_orientation);
-                    }
-                    if second.contains_split(target_id) {
-                        return second.equalize_split_cluster(target_id, target_orientation);
-                    }
+                    first.contains_split_contiguous(target_id, target_orientation)
+                        || second.contains_split_contiguous(target_id, target_orientation)
                 }
-                false
+            }
+        }
+    }
+
+    pub fn equalize_split_cluster(
+        &mut self,
+        target_id: SplitId,
+        target_orientation: SplitOrientation,
+    ) -> Option<SplitId> {
+        if self.contains_split_contiguous(target_id, target_orientation) {
+            self.equalize_cluster(target_orientation);
+            if let LayoutNode::Split { id, .. } = self {
+                return Some(*id);
+            }
+            return None;
+        }
+        match self {
+            LayoutNode::Leaf(_) => None,
+            LayoutNode::Split {
+                first,
+                second,
+                ..
+            } => {
+                if first.contains_split(target_id) {
+                    first.equalize_split_cluster(target_id, target_orientation)
+                } else if second.contains_split(target_id) {
+                    second.equalize_split_cluster(target_id, target_orientation)
+                } else {
+                    None
+                }
             }
         }
     }
@@ -583,13 +628,17 @@ impl LayoutTree {
         }
     }
 
-    pub fn equalize_split(&mut self, split_id: SplitId) -> bool {
-        let Some(ref mut root) = self.root else {
-            return false;
-        };
-        let Some(orientation) = root.find_split_orientation(split_id) else {
-            return false;
-        };
+    pub fn find_split_node(&self, target_id: SplitId) -> Option<&LayoutNode> {
+        self.root.as_ref().and_then(|r| r.find_split_node(target_id))
+    }
+
+    pub fn find_split_orientation(&self, target_id: SplitId) -> Option<SplitOrientation> {
+        self.root.as_ref().and_then(|r| r.find_split_orientation(target_id))
+    }
+
+    pub fn equalize_split(&mut self, split_id: SplitId) -> Option<SplitId> {
+        let root = self.root.as_mut()?;
+        let orientation = root.find_split_orientation(split_id)?;
         root.equalize_split_cluster(split_id, orientation)
     }
 
@@ -1135,7 +1184,7 @@ mod tests {
             .unwrap();
         tree.set_split_ratio(SplitId(1), 0.8);
 
-        assert!(tree.equalize_split(SplitId(1)));
+        assert!(tree.equalize_split(SplitId(1)).is_some());
         if let Some(LayoutNode::Split { ratio, .. }) = tree.root() {
             assert!((ratio - 0.5).abs() < 1e-6);
         } else {
@@ -1154,7 +1203,7 @@ mod tests {
         tree.set_split_ratio(SplitId(1), 0.7);
         tree.set_split_ratio(SplitId(2), 0.2);
 
-        assert!(tree.equalize_split(SplitId(2)));
+        assert!(tree.equalize_split(SplitId(2)).is_some());
         if let Some(LayoutNode::Split { ratio: r1, second, .. }) = tree.root() {
             // Root should have ratio 1/3
             assert!((r1 - (1.0 / 3.0)).abs() < 1e-6);
@@ -1166,6 +1215,72 @@ mod tests {
             }
         } else {
             panic!("Expected root to be split");
+        }
+    }
+
+    #[test]
+    fn test_equalize_split_nested_orthogonal_isolation() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        // Split Right (A | B) -> SplitId(1), Horizontal
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2)).unwrap();
+        // Split Right (B | C) -> SplitId(2), Horizontal
+        tree.split(PaneId(2), SplitOrientation::Horizontal, PaneId(3)).unwrap();
+        // Split Down (C / D) -> SplitId(3), Vertical
+        tree.split(PaneId(3), SplitOrientation::Vertical, PaneId(4)).unwrap();
+        // Split Right (D | E) -> SplitId(4), Horizontal
+        tree.split(PaneId(4), SplitOrientation::Horizontal, PaneId(5)).unwrap();
+
+        // Mess up ratios
+        tree.set_split_ratio(SplitId(1), 0.2);
+        tree.set_split_ratio(SplitId(2), 0.7);
+        tree.set_split_ratio(SplitId(3), 0.6);
+        tree.set_split_ratio(SplitId(4), 0.1);
+
+        // Equalize SplitId(4) (between D and E)
+        assert_eq!(tree.equalize_split(SplitId(4)), Some(SplitId(4)));
+
+        // Split 1, 2, 3 MUST REMAIN UNTOUCHED!
+        if let Some(LayoutNode::Split { ratio: r1, second, .. }) = tree.root() {
+            assert!((r1 - 0.2).abs() < 1e-6, "Split 1 should remain 0.2, got {}", r1);
+            if let LayoutNode::Split { ratio: r2, second: s2, .. } = &**second {
+                assert!((r2 - 0.7).abs() < 1e-6, "Split 2 should remain 0.7, got {}", r2);
+                if let LayoutNode::Split { ratio: r3, second: s3, .. } = &**s2 {
+                    assert!((r3 - 0.6).abs() < 1e-6, "Split 3 should remain 0.6, got {}", r3);
+                    if let LayoutNode::Split { ratio: r4, .. } = &**s3 {
+                        // Split 4 (between D and E) MUST BE 0.5!
+                        assert!((r4 - 0.5).abs() < 1e-6, "Split 4 should be 0.5, got {}", r4);
+                    } else {
+                        panic!("Expected Split 4");
+                    }
+                } else {
+                    panic!("Expected Split 3");
+                }
+            } else {
+                panic!("Expected Split 2");
+            }
+        } else {
+            panic!("Expected root");
+        }
+
+        // Now equalize SplitId(2) (between B and C)
+        assert_eq!(tree.equalize_split(SplitId(2)), Some(SplitId(1)));
+
+        // Split 1 and Split 2 form a horizontal cluster!
+        // Weight of A is 1. Weight of (B + (C/D/E)) is 2.
+        // So Split 1 should become 1/3.
+        // Split 2 should become 1/2.
+        // Split 3 (Vertical) and Split 4 (D|E) MUST REMAIN UNTOUCHED!
+        if let Some(LayoutNode::Split { ratio: r1, second, .. }) = tree.root() {
+            assert!((r1 - (1.0 / 3.0)).abs() < 1e-6, "Split 1 should be 1/3, got {}", r1);
+            if let LayoutNode::Split { ratio: r2, second: s2, .. } = &**second {
+                assert!((r2 - 0.5).abs() < 1e-6, "Split 2 should be 0.5, got {}", r2);
+                if let LayoutNode::Split { ratio: r3, second: s3, .. } = &**s2 {
+                    assert!((r3 - 0.6).abs() < 1e-6, "Split 3 should remain 0.6, got {}", r3);
+                    if let LayoutNode::Split { ratio: r4, .. } = &**s3 {
+                        assert!((r4 - 0.5).abs() < 1e-6, "Split 4 should remain 0.5, got {}", r4);
+                    }
+                }
+            }
         }
     }
 
