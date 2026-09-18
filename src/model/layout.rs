@@ -514,6 +514,10 @@ impl LayoutTree {
         self.root.as_ref()
     }
 
+    pub fn root_mut(&mut self) -> Option<&mut LayoutNode> {
+        self.root.as_mut()
+    }
+
     pub fn panes(&self) -> Vec<PaneId> {
         let mut list = Vec::new();
         if let Some(ref root) = self.root {
