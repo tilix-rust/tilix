@@ -1097,6 +1097,54 @@ impl TilixWindow {
             });
             self.window.add_action(&action);
         }
+
+        // Zoom In
+        {
+            let action = gio::SimpleAction::new("zoom-in", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().zoom_in_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
+
+        // Zoom Out
+        {
+            let action = gio::SimpleAction::new("zoom-out", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().zoom_out_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
+
+        // Zoom Normal
+        {
+            let action = gio::SimpleAction::new("zoom-normal", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().zoom_normal_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
     }
 
     pub fn window(&self) -> &adw::ApplicationWindow {

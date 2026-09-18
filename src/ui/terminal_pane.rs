@@ -23,6 +23,11 @@ type BellCallback = Box<dyn Fn(PaneId)>;
 type ChildExitCallback = Box<dyn Fn(PaneId, i32)>;
 type DockCallback = Box<dyn Fn(PaneId, PaneId, DockPosition)>;
 
+pub const ZOOM_STEP: f64 = 0.1;
+pub const ZOOM_MIN: f64 = 0.2;
+pub const ZOOM_MAX: f64 = 5.0;
+pub const ZOOM_NORMAL: f64 = 1.0;
+
 #[derive(Clone)]
 struct PaneWidgets {
     terminal: vte::Terminal,
@@ -49,6 +54,7 @@ pub struct TerminalPane {
     split_v_btn: gtk::Button,
     close_btn: gtk::Button,
     terminal: vte::Terminal,
+    font_scale: Rc<Cell<f64>>,
     pane_id: PaneId,
     child_pid: Rc<Cell<Option<i32>>>,
     current_directory: Rc<RefCell<Option<PathBuf>>>,
@@ -127,6 +133,46 @@ impl TerminalPane {
         term_box.set_hexpand(true);
         term_box.append(&terminal);
         term_box.append(&scrollbar);
+
+        let font_scale = Rc::new(Cell::new(ZOOM_NORMAL));
+
+        // Wire scroll controller for font zoom interception (Ctrl + scroll)
+        {
+            let scroll_controller =
+                gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            scroll_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let term_ref = terminal.clone();
+            let font_scale_rc = Rc::clone(&font_scale);
+            scroll_controller.connect_scroll(move |controller, _dx, dy| {
+                let state = controller.current_event_state();
+                let has_ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                let has_shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                let has_alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
+
+                if has_ctrl && !has_shift && !has_alt {
+                    if dy < 0.0 {
+                        let current = font_scale_rc.get();
+                        let next = (((current + ZOOM_STEP) * 10.0).round() / 10.0)
+                            .clamp(ZOOM_MIN, ZOOM_MAX);
+                        font_scale_rc.set(next);
+                        term_ref.set_font_scale(next);
+                        gtk::glib::Propagation::Stop
+                    } else if dy > 0.0 {
+                        let current = font_scale_rc.get();
+                        let next = (((current - ZOOM_STEP) * 10.0).round() / 10.0)
+                            .clamp(ZOOM_MIN, ZOOM_MAX);
+                        font_scale_rc.set(next);
+                        term_ref.set_font_scale(next);
+                        gtk::glib::Propagation::Stop
+                    } else {
+                        gtk::glib::Propagation::Proceed
+                    }
+                } else {
+                    gtk::glib::Propagation::Proceed
+                }
+            });
+            terminal.add_controller(scroll_controller);
+        }
 
         // Wire click gesture on header to focus terminal
         {
@@ -478,6 +524,7 @@ impl TerminalPane {
             split_v_btn,
             close_btn,
             terminal,
+            font_scale,
             pane_id,
             child_pid,
             current_directory,
@@ -829,6 +876,29 @@ impl TerminalPane {
         )
     }
 
+    pub fn font_scale(&self) -> f64 {
+        self.font_scale.get()
+    }
+
+    pub fn zoom_in(&self) {
+        let current = self.font_scale.get();
+        let next = (((current + ZOOM_STEP) * 10.0).round() / 10.0).clamp(ZOOM_MIN, ZOOM_MAX);
+        self.font_scale.set(next);
+        self.terminal.set_font_scale(next);
+    }
+
+    pub fn zoom_out(&self) {
+        let current = self.font_scale.get();
+        let next = (((current - ZOOM_STEP) * 10.0).round() / 10.0).clamp(ZOOM_MIN, ZOOM_MAX);
+        self.font_scale.set(next);
+        self.terminal.set_font_scale(next);
+    }
+
+    pub fn zoom_normal(&self) {
+        self.font_scale.set(ZOOM_NORMAL);
+        self.terminal.set_font_scale(ZOOM_NORMAL);
+    }
+
     pub fn grab_focus(&self) {
         self.terminal.grab_focus();
     }
@@ -1174,7 +1244,8 @@ impl TerminalPane {
             return;
         }
         self.drag_source_initialized.set(true);
-        crate::ui::dnd::setup_pane_drag_source(&self.header, self.clone());
+        crate::ui::dnd::setup_pane_drag_source(&self.header, self.clone(), false);
+        crate::ui::dnd::setup_pane_drag_source(&self.terminal, self.clone(), true);
     }
 
     pub fn setup_drop_target<F: Fn(PaneId, PaneId, DockPosition) + 'static>(&self, on_dock: F) {
@@ -1399,6 +1470,33 @@ mod tests {
             // Hold should NOT trigger close callbacks
             assert!(!close_called.get());
             assert!(pane.title().contains("[Process exited: 0]"));
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_zoom_operations() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(1), None);
+            assert_eq!(pane.font_scale(), ZOOM_NORMAL);
+
+            pane.zoom_in();
+            assert!((pane.font_scale() - 1.1).abs() < 1e-6);
+
+            pane.zoom_out();
+            assert!((pane.font_scale() - 1.0).abs() < 1e-6);
+
+            pane.zoom_normal();
+            assert_eq!(pane.font_scale(), ZOOM_NORMAL);
+
+            for _ in 0..20 {
+                pane.zoom_out();
+            }
+            assert_eq!(pane.font_scale(), ZOOM_MIN);
+
+            for _ in 0..60 {
+                pane.zoom_in();
+            }
+            assert_eq!(pane.font_scale(), ZOOM_MAX);
         });
     }
 }

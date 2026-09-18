@@ -477,6 +477,29 @@ impl SessionView {
         self.model.borrow().active_pane
     }
 
+    pub fn active_pane(&self) -> Option<TerminalPane> {
+        let id = self.active_pane_id()?;
+        self.panes.borrow().get(&id).cloned()
+    }
+
+    pub fn zoom_in_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.zoom_in();
+        }
+    }
+
+    pub fn zoom_out_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.zoom_out();
+        }
+    }
+
+    pub fn zoom_normal_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.zoom_normal();
+        }
+    }
+
     pub fn sync_input_enabled(&self) -> bool {
         self.model.borrow().sync_input_enabled
     }

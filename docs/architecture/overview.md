@@ -1,7 +1,7 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.12.0 (Phase 12 Dynamic Window Geometry & Default Size Calculation)  
+**Version:** 0.13.0 (Phase 13 Terminal Font Zoom & Alt Drag-and-Drop Pane Docking)  
 **Date:** 2026-09-18  
 
 
@@ -706,5 +706,41 @@ Target window dimensions are computed from the profile's character grid and acti
 - **Default Profile Sizing:** `TilixWindow::new_empty` delegates to `Self::new_empty_with_profile(app, cfg.get_default_profile())`, querying the default monitor via `gdk::Display::default()` and sizing the window accordingly.
 - **Profile-Specific Constructors:** Added `TilixWindow::new_empty_with_profile(app, profile)` and `TilixWindow::new_with_profile(app, profile)`.
 - **Detached Window Sizing:** `detach_drag_to_new_window` retrieves the detached pane's profile via `pane.current_profile()` and sizes the new window using `TilixWindow::new_empty_with_profile(&app, &profile)`.
+
+---
+
+## 25. Terminal Font Zooming & Alt Drag-and-Drop Docking (Phase 13)
+
+### 25.1 Dynamic Font Zooming Engine (`src/ui/terminal_pane.rs`)
+- **Zoom Arithmetic & Precision:** Font scaling operates in incremental steps of $0.1$ (`ZOOM_STEP = 0.1`) bounded by $[0.2, 5.0]$ (`ZOOM_MIN` to `ZOOM_MAX`). Precision is preserved across repeated zoom increments and decrements via round-to-tenth arithmetic:
+  $$\text{scale}_{\text{new}} = \text{clamp}\left(\frac{\text{round}((\text{scale}_{\text{current}} \pm 0.1) \times 10.0)}{10.0}, 0.2, 5.0\right)$$
+  Reset returns scale to $1.0$ (`ZOOM_NORMAL`).
+- **Internal Scale Tracking:** `TerminalPane` tracks logical scale in `Rc<Cell<f64>>` to prevent grid misalignment from underlying VTE minimum scale clamp ($0.25$).
+- **Public API:** `font_scale(&self) -> f64`, `zoom_in(&self)`, `zoom_out(&self)`, `zoom_normal(&self)`.
+
+### 25.2 Mouse Wheel Capture Interception
+- **Capture Phase Controller:** A `gtk::EventControllerScroll` configured with `EventControllerScrollFlags::VERTICAL` is attached to the terminal widget using `PropagationPhase::Capture`.
+- **Modifier Filtering:** Vertical scroll events are evaluated against `current_event_state()`:
+  - When `CONTROL_MASK` is active and neither `SHIFT_MASK` nor `ALT_MASK` is active:
+    - Upward scroll (`dy < 0.0`): triggers `zoom_in()` and returns `glib::Propagation::Stop`.
+    - Downward scroll (`dy > 0.0`): triggers `zoom_out()` and returns `glib::Propagation::Stop`.
+  - In all other circumstances (unmodified scrolling or when Shift/Alt are pressed), returns `glib::Propagation::Proceed`, permitting standard terminal buffer scrolling and text navigation.
+
+### 25.3 Keybinding Catalog Expansion (`src/model/keybindings.rs`)
+- **Expanded Catalog (27 Actions):** Added 3 dedicated zoom shortcut definitions under `ActionCategory::ViewAndSettings` (total 5 view actions):
+  - `win.zoom-in` ("Zoom In", default accelerators: `<Primary>plus`, `<Primary>equal`, `<Primary>KP_Add`).
+  - `win.zoom-out` ("Zoom Out", default accelerators: `<Primary>minus`, `<Primary>KP_Subtract`).
+  - `win.zoom-normal` ("Normal Size", default accelerators: `<Primary>0`, `<Primary>KP_0`).
+- **Action Dispatch Pipeline:** `TilixWindow` registers `zoom-in`, `zoom-out`, and `zoom-normal` `gio::SimpleAction`s in `setup_actions`, routing to `SessionView::zoom_in_active()`, `zoom_out_active()`, and `zoom_normal_active()`, which target the active session's currently focused `TerminalPane`.
+
+### 25.4 Alt + Left-Click Terminal Drag Docking (`src/ui/dnd.rs`, `src/ui/terminal_pane.rs`)
+- **Dual Drag Sources:** `TerminalPane::setup_drag_source` attaches independent drag sources to both:
+  - Header bar (`TerminalPane.header`): `require_alt = false` (unrestricted left-click drag).
+  - Terminal area (`TerminalPane.terminal`): `require_alt = true` (Alt-gated drag).
+- **Sequence Denial & Selection Preservation (Issue #1335):**
+  - In `drag_source.connect_begin`: if `require_alt` is true and `ALT_MASK` is absent, the gesture sequence is immediately rejected via `gesture.set_sequence_state(seq, gtk::EventSequenceState::Denied)` (or `gesture.set_state(EventSequenceState::Denied)`).
+  - In `drag_source.connect_prepare`: if `require_alt` is true and `ALT_MASK` is absent, returns `None`.
+  - This ensures standard terminal text selection, double-click word selection, and link clicking continue uninhibited unless the user explicitly holds `Alt` while initiating a drag.
+
 
 

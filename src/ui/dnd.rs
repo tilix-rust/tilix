@@ -34,14 +34,59 @@ pub fn clear_active_pane_drag() {
     ACTIVE_PANE_DRAG.with(|cell| *cell.borrow_mut() = None);
 }
 
-pub fn setup_pane_drag_source(widget: &impl IsA<gtk::Widget>, pane: TerminalPane) {
+pub fn setup_pane_drag_source(
+    widget: &impl IsA<gtk::Widget>,
+    pane: TerminalPane,
+    require_alt: bool,
+) {
     let drag_source = gtk::DragSource::new();
     drag_source.set_actions(gtk::gdk::DragAction::MOVE);
     let pane_id = pane.pane_id();
     let id_val = pane_id.0;
-    let pane_clone = pane;
+    let pane_clone = pane.clone();
+
+    if require_alt {
+        drag_source.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let pane_focus = pane.clone();
+        drag_source.connect_begin(move |gesture, seq| {
+            let state = gesture.current_event_state();
+            let has_mod = state.intersects(
+                gtk::gdk::ModifierType::ALT_MASK
+                    | gtk::gdk::ModifierType::META_MASK
+                    | gtk::gdk::ModifierType::SUPER_MASK,
+            );
+            if has_mod {
+                pane_focus.grab_focus();
+                #[allow(deprecated)]
+                if let Some(s) = seq {
+                    gesture.set_sequence_state(s, gtk::EventSequenceState::Claimed);
+                } else {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                }
+            } else {
+                #[allow(deprecated)]
+                if let Some(s) = seq {
+                    gesture.set_sequence_state(s, gtk::EventSequenceState::Denied);
+                } else {
+                    gesture.set_state(gtk::EventSequenceState::Denied);
+                }
+            }
+        });
+    }
 
     drag_source.connect_prepare(move |source, _x, _y| {
+        if require_alt {
+            let state = source.current_event_state();
+            let has_mod = state.intersects(
+                gtk::gdk::ModifierType::ALT_MASK
+                    | gtk::gdk::ModifierType::META_MASK
+                    | gtk::gdk::ModifierType::SUPER_MASK,
+            );
+            if !has_mod {
+                return None;
+            }
+        }
+
         let session_widget = source
             .widget()
             .and_then(|w| crate::ui::window::find_session_widget(&w))
@@ -56,6 +101,12 @@ pub fn setup_pane_drag_source(widget: &impl IsA<gtk::Widget>, pane: TerminalPane
         set_active_pane_drag(Some(active));
 
         Some(gtk::gdk::ContentProvider::for_value(&id_val.to_value()))
+    });
+
+    let pane_widget = pane.widget().clone();
+    drag_source.connect_drag_begin(move |source, _drag| {
+        let paintable = gtk::WidgetPaintable::new(Some(&pane_widget));
+        source.set_icon(Some(&paintable), 0, 0);
     });
 
     drag_source.connect_drag_cancel(move |_source, _drag, reason| {

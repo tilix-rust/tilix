@@ -15,7 +15,7 @@ use model::keybindings::{
 
 #[test]
 fn test_action_catalog_integrity_and_default_uniqueness() {
-    assert_eq!(ACTION_CATALOG.len(), 24);
+    assert_eq!(ACTION_CATALOG.len(), 27);
 
     let mut ids = std::collections::HashSet::new();
     let mut default_accel_map: std::collections::HashMap<String, &'static str> =
@@ -76,7 +76,7 @@ fn test_action_categories_and_titles() {
     assert_eq!(session_actions.len(), 14);
     assert_eq!(split_actions.len(), 4);
     assert_eq!(nav_actions.len(), 4);
-    assert_eq!(view_actions.len(), 2);
+    assert_eq!(view_actions.len(), 5);
 }
 
 #[test]

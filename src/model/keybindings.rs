@@ -194,7 +194,7 @@ pub static ACTION_CATALOG: &[ActionShortcutDef] = &[
         category: ActionCategory::Navigation,
         default_accels: &["<Alt>Right"],
     },
-    // View & Settings (2 actions)
+    // View & Settings (5 actions)
     ActionShortcutDef {
         id: "win.toggle-tab-bar",
         title: "Toggle Tab Bar",
@@ -208,6 +208,27 @@ pub static ACTION_CATALOG: &[ActionShortcutDef] = &[
         description: "Open application preferences dialog",
         category: ActionCategory::ViewAndSettings,
         default_accels: &["<Primary>comma"],
+    },
+    ActionShortcutDef {
+        id: "win.zoom-in",
+        title: "Zoom In",
+        description: "Increase terminal font size",
+        category: ActionCategory::ViewAndSettings,
+        default_accels: &["<Primary>plus", "<Primary>equal", "<Primary>KP_Add"],
+    },
+    ActionShortcutDef {
+        id: "win.zoom-out",
+        title: "Zoom Out",
+        description: "Decrease terminal font size",
+        category: ActionCategory::ViewAndSettings,
+        default_accels: &["<Primary>minus", "<Primary>KP_Subtract"],
+    },
+    ActionShortcutDef {
+        id: "win.zoom-normal",
+        title: "Normal Size",
+        description: "Reset terminal font size to default",
+        category: ActionCategory::ViewAndSettings,
+        default_accels: &["<Primary>0", "<Primary>KP_0"],
     },
 ];
 
@@ -421,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_action_catalog_completeness() {
-        assert_eq!(ACTION_CATALOG.len(), 24);
+        assert_eq!(ACTION_CATALOG.len(), 27);
         let ids: Vec<&str> = ACTION_CATALOG.iter().map(|d| d.id).collect();
         assert!(ids.contains(&"win.new-tab"));
         assert!(ids.contains(&"win.close-pane"));
@@ -438,6 +459,9 @@ mod tests {
         assert!(ids.contains(&"win.focus-left"));
         assert!(ids.contains(&"win.focus-right"));
         assert!(ids.contains(&"win.toggle-tab-bar"));
+        assert!(ids.contains(&"win.zoom-in"));
+        assert!(ids.contains(&"win.zoom-out"));
+        assert!(ids.contains(&"win.zoom-normal"));
         for i in 1..=9 {
             let action_id = format!("win.switch-tab-{}", i);
             assert!(ids.contains(&action_id.as_str()));
@@ -449,6 +473,42 @@ mod tests {
             assert!(!def.description.is_empty());
             assert!(!def.category.title().is_empty());
         }
+    }
+
+    #[test]
+    fn test_effective_accel_zoom_actions() {
+        let config = KeybindingsConfig::default();
+        assert_eq!(
+            config.get_effective_accel("win.zoom-in"),
+            Some("<Primary>plus".to_string())
+        );
+        assert_eq!(
+            config.get_effective_accel("win.zoom-out"),
+            Some("<Primary>minus".to_string())
+        );
+        assert_eq!(
+            config.get_effective_accel("win.zoom-normal"),
+            Some("<Primary>0".to_string())
+        );
+        assert_eq!(
+            config.get_all_effective_accels("win.zoom-in"),
+            vec![
+                "<Primary>plus".to_string(),
+                "<Primary>equal".to_string(),
+                "<Primary>KP_Add".to_string()
+            ]
+        );
+        assert_eq!(
+            config.get_all_effective_accels("win.zoom-out"),
+            vec![
+                "<Primary>minus".to_string(),
+                "<Primary>KP_Subtract".to_string()
+            ]
+        );
+        assert_eq!(
+            config.get_all_effective_accels("win.zoom-normal"),
+            vec!["<Primary>0".to_string(), "<Primary>KP_0".to_string()]
+        );
     }
 
     #[test]
