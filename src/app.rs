@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gio::prelude::*;
+use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::ui::preferences::TilixPreferencesWindow;
@@ -51,6 +52,7 @@ impl TilixApplication {
         let quake_window: Rc<RefCell<Option<TilixQuakeWindow>>> = Rc::new(RefCell::new(None));
 
         app.connect_startup(|app| {
+            apply_dpi_workaround();
             crate::ui::window::setup_css();
             crate::ui::window::setup_accels(app);
         });
@@ -140,6 +142,89 @@ impl Default for TilixApplication {
     }
 }
 
+/// Calculates the adjusted GTK Xft DPI to compensate for HiDPI/double-scaling issues.
+///
+/// Returns `Some(target_dpi)` if DPI needs adjustment, or `None` if no change should be made.
+///
+/// Rules:
+/// 1. Only applies on X11 environments (`is_x11 == true`).
+/// 2. If `GDK_SCALE` is explicitly set to "1", skip (already 1x).
+/// 3. If base DPI is already 96 DPI (98304 in 1/1024th units), skip (no double scaling to fix).
+/// 4. If `GDK_DPI_SCALE` is set, scale base DPI by `GDK_DPI_SCALE`.
+///    If `GDK_DPI_SCALE` is not set but `GDK_SCALE > 1` (e.g. 2) and DPI is elevated,
+///    auto-compensate by `1.0 / GDK_SCALE`.
+pub fn calculate_target_dpi(
+    is_x11: bool,
+    gdk_scale: Option<&str>,
+    gdk_dpi_scale: Option<&str>,
+    current_xft_dpi: i32,
+) -> Option<i32> {
+    // 1. 当前环境是 X11
+    if !is_x11 {
+        return None;
+    }
+
+    // 2. 设置了 GDK_SCALE 不能为 1 (如果是 1 则已经是 1x，无需缩放字体)
+    if gdk_scale == Some("1") {
+        return None;
+    }
+
+    // 4. GTK 中 96 DPI 对应 96 * 1024 = 98304；<= 0 表示系统默认 96 DPI
+    let base_dpi = if current_xft_dpi > 0 {
+        current_xft_dpi
+    } else {
+        98304
+    };
+
+    // 如果 dpi 已经是 96，无需重复缩放
+    if base_dpi == 98304 {
+        return None;
+    }
+
+    // 3. 检查 GDK_DPI_SCALE (或 GDK_SCALE > 1 时的自动补偿)
+    let dpi_scale: f64 = if let Some(val) = gdk_dpi_scale {
+        match val.parse::<f64>() {
+            Ok(v) if v > 0.0 => v,
+            _ => return None,
+        }
+    } else if let Some(scale_str) = gdk_scale {
+        match scale_str.parse::<f64>() {
+            Ok(scale) if scale > 1.0 => 1.0 / scale,
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+
+    // 5. 将 dpi * GDK_DPI_SCALE 的值作为目标 DPI
+    let target_dpi = (base_dpi as f64 * dpi_scale).round() as i32;
+    Some(target_dpi)
+}
+
+/// Adjusts GTK Xft DPI on startup to prevent double-scaling under X11 HiDPI environments.
+pub fn apply_dpi_workaround() {
+    let is_x11 = if let Some(display) = gtk::gdk::Display::default() {
+        display.type_().name().contains("X11")
+    } else {
+        std::env::var("WAYLAND_DISPLAY").is_err() && std::env::var("DISPLAY").is_ok()
+    };
+
+    let gdk_scale = std::env::var("GDK_SCALE").ok();
+    let gdk_dpi_scale = std::env::var("GDK_DPI_SCALE").ok();
+
+    if let Some(settings) = gtk::Settings::default() {
+        let current_dpi = settings.gtk_xft_dpi();
+        if let Some(target_dpi) = calculate_target_dpi(
+            is_x11,
+            gdk_scale.as_deref(),
+            gdk_dpi_scale.as_deref(),
+            current_dpi,
+        ) {
+            settings.set_gtk_xft_dpi(target_dpi);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +251,58 @@ mod tests {
     fn test_parse_cli_args_preferences() {
         assert_eq!(parse_cli_args(["--preferences"]), CliAction::Preferences);
         assert_eq!(parse_cli_args(["tilix", "-p"]), CliAction::Preferences);
+    }
+
+    #[test]
+    fn test_calculate_target_dpi_wayland_ignored() {
+        assert_eq!(
+            calculate_target_dpi(false, Some("2"), Some("0.5"), 196608),
+            None
+        );
+    }
+
+    #[test]
+    fn test_calculate_target_dpi_scale_one_ignored() {
+        assert_eq!(
+            calculate_target_dpi(true, Some("1"), Some("0.5"), 196608),
+            None
+        );
+    }
+
+    #[test]
+    fn test_calculate_target_dpi_already_96_ignored() {
+        // 98304 is 96 DPI in GTK (96 * 1024)
+        assert_eq!(
+            calculate_target_dpi(true, Some("2"), Some("0.5"), 98304),
+            None
+        );
+        // Default (-1 or 0) also defaults to 96 DPI
+        assert_eq!(
+            calculate_target_dpi(true, Some("2"), Some("0.5"), -1),
+            None
+        );
+    }
+
+    #[test]
+    fn test_calculate_target_dpi_with_dpi_scale() {
+        // 192 DPI (196608) * 0.5 = 98304 (96 DPI)
+        assert_eq!(
+            calculate_target_dpi(true, Some("2"), Some("0.5"), 196608),
+            Some(98304)
+        );
+        // Even if GDK_SCALE is not explicitly set in env, explicit GDK_DPI_SCALE still applies
+        assert_eq!(
+            calculate_target_dpi(true, None, Some("0.5"), 196608),
+            Some(98304)
+        );
+    }
+
+    #[test]
+    fn test_calculate_target_dpi_scale_2_auto_compensation() {
+        // GDK_SCALE=2, DPI=192, no GDK_DPI_SCALE provided -> automatically scales by 1/2 = 0.5
+        assert_eq!(
+            calculate_target_dpi(true, Some("2"), None, 196608),
+            Some(98304)
+        );
     }
 }
