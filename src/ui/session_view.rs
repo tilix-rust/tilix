@@ -789,6 +789,24 @@ impl SessionView {
                 paned.set_start_child(Some(&first_widget));
                 paned.set_end_child(Some(&second_widget));
 
+                // Reorder separator to be the last child of GtkPaned.
+                // In GTK4, gtk_widget_pick evaluates children in reverse order (last to first).
+                // With handle as the last child, handle_contains (which insets the 1px handle
+                // by 6px on all sides) is tested FIRST before start_child and end_child.
+                // This gives an exact, symmetric 6px hover/click hit area on BOTH sides of the 1px line!
+                let mut handle = None;
+                let mut c = paned.first_child();
+                while let Some(child) = c {
+                    if child.css_name() == "separator" {
+                        handle = Some(child);
+                        break;
+                    }
+                    c = child.next_sibling();
+                }
+                if let (Some(ref h), Some(ref end)) = (&handle, paned.end_child()) {
+                    h.insert_after(&paned, Some(end));
+                }
+
                 let r = *ratio;
                 paned.connect_map(move |p| {
                     let p_weak = p.downgrade();
@@ -821,7 +839,7 @@ impl SessionView {
                     }
                 });
 
-                // Attach double-click gesture directly to paned and group with its drag gesture
+                // Locate GtkPaned's built-in drag gesture
                 let controllers = paned.observe_controllers();
                 let mut drag_opt = None;
                 for i in 0..controllers.n_items() {
@@ -832,11 +850,16 @@ impl SessionView {
                     }
                 }
 
+                let just_equalized = Rc::new(std::cell::Cell::new(false));
                 let split_id = *id;
                 let split_orientation = *orientation;
                 let model_clone = Rc::clone(model);
                 let drag_for_notify = drag_opt.clone();
+                let just_eq_notify = Rc::clone(&just_equalized);
                 paned.connect_notify_local(Some("position"), move |p, _| {
+                    if just_eq_notify.get() {
+                        return;
+                    }
                     // Only update ratio from position if user is dragging
                     if let Some(ref drag) = drag_for_notify {
                         if !drag.is_active() {
@@ -858,61 +881,90 @@ impl SessionView {
 
                 let container_weak = container.downgrade();
                 let paned_weak = paned.downgrade();
-                let model_for_click = Rc::clone(model);
-                let click = gtk::GestureClick::new();
-                click.set_button(gtk::gdk::BUTTON_PRIMARY);
-                click.set_propagation_phase(gtk::PropagationPhase::Capture);
-                paned.add_controller(click.clone());
-                if let Some(ref drag) = drag_opt {
-                    click.group_with(drag);
-                }
-
-                let do_equalize = Rc::new(move |gesture: &gtk::GestureClick, n_press: i32, x: f64, y: f64| {
-                    if n_press != 2 {
-                        return;
-                    }
-                    let Some(p) = paned_weak.upgrade() else {
-                        return;
-                    };
-                    let pos = p.position() as f64;
-                    let is_on_handle = (match p.orientation() {
-                        gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
-                        gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
-                        _ => false,
-                    }) || p.pick(x, y, gtk::PickFlags::DEFAULT).map(|w| w.css_name() == "separator").unwrap_or(false);
-
-                    if !is_on_handle {
-                        return;
-                    }
-
-                    gesture.set_state(gtk::EventSequenceState::Claimed);
-                    if let Ok(mut m) = model_for_click.try_borrow_mut() {
+                let model_for_equalize = Rc::clone(model);
+                let just_eq_action = Rc::clone(&just_equalized);
+                let equalize_action = Rc::new(move || {
+                    just_eq_action.set(true);
+                    if let Ok(mut m) = model_for_equalize.try_borrow_mut() {
                         m.layout.equalize_direction(split_orientation);
                     }
                     if let Some(container) = container_weak.upgrade() {
-                        let model_b = model_for_click.borrow();
+                        let model_b = model_for_equalize.borrow();
                         if let Some(root_node) = model_b.layout.root() {
                             if let Some(root_widget) = container.first_child() {
                                 Self::apply_ratios_recursive(root_node, &root_widget);
                                 let root_clone = root_node.clone();
                                 let rw_weak = root_widget.downgrade();
+                                let just_eq_idle = Rc::clone(&just_eq_action);
                                 glib::idle_add_local_once(move || {
                                     if let Some(rw) = rw_weak.upgrade() {
                                         Self::apply_ratios_recursive(&root_clone, &rw);
                                     }
+                                    just_eq_idle.set(false);
                                 });
                             }
                         }
                     }
                 });
 
-                let do_equalize_rel = Rc::clone(&do_equalize);
-                click.connect_pressed(move |g, n, x, y| {
-                    do_equalize(g, n, x, y);
-                });
-                click.connect_released(move |g, n, x, y| {
-                    do_equalize_rel(g, n, x, y);
-                });
+                let last_click_time = Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+
+                // 1. Connect to GtkPaned's native drag gesture (which GTK activates only on the separator)
+                if let Some(ref drag) = drag_opt {
+                    let last_click = Rc::clone(&last_click_time);
+                    let eq = Rc::clone(&equalize_action);
+                    drag.connect_drag_begin(move |_gesture, _start_x, _start_y| {
+                        let now = std::time::Instant::now();
+                        let is_double = if let Some(prev) = last_click.get() {
+                            now.duration_since(prev) < std::time::Duration::from_millis(450)
+                        } else {
+                            false
+                        };
+                        last_click.set(Some(now));
+                        if is_double {
+                            last_click.set(None);
+                            eq();
+                        }
+                    });
+                }
+
+                // 2. Attach GestureClick on paned as direct backup
+                let click = gtk::GestureClick::new();
+                click.set_button(gtk::gdk::BUTTON_PRIMARY);
+                click.set_propagation_phase(gtk::PropagationPhase::Capture);
+                paned.add_controller(click.clone());
+                {
+                    let last_click = Rc::clone(&last_click_time);
+                    let eq = Rc::clone(&equalize_action);
+                    let paned_weak = paned_weak.clone();
+                    click.connect_pressed(move |gesture, n_press, x, y| {
+                        let Some(p) = paned_weak.upgrade() else { return; };
+                        let pos = p.position() as f64;
+                        let is_on_handle = (match p.orientation() {
+                            gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
+                            gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
+                            _ => false,
+                        }) || p.pick(x, y, gtk::PickFlags::DEFAULT).map(|w| w.css_name() == "separator").unwrap_or(false);
+
+                        if !is_on_handle {
+                            return;
+                        }
+
+                        let now = std::time::Instant::now();
+                        let is_double_time = if let Some(prev) = last_click.get() {
+                            now.duration_since(prev) < std::time::Duration::from_millis(450)
+                        } else {
+                            false
+                        };
+                        last_click.set(Some(now));
+
+                        if n_press == 2 || is_double_time {
+                            last_click.set(None);
+                            gesture.set_state(gtk::EventSequenceState::Claimed);
+                            eq();
+                        }
+                    });
+                }
 
                 paned.upcast()
             }
@@ -1423,11 +1475,25 @@ mod tests {
                 ctx.iteration(false);
             }
 
-            // Hit test: line is drawn at x = 200.
-            // Left of line: [194..199] (6px) picked as separator.
-            // Right of line: [201..206] (6px) picked as separator.
-            // Exactly 6px symmetric hit area on both sides.
-            for x in [194.0, 197.0, 199.0, 200.0, 201.0, 203.0, 206.0] {
+            let mut handle = None;
+            let mut c = paned.first_child();
+            while let Some(child) = c {
+                if child.css_name() == "separator" {
+                    handle = Some(child);
+                    break;
+                }
+                c = child.next_sibling();
+            }
+
+            if let (Some(ref h), Some(ref end)) = (&handle, paned.end_child()) {
+                h.insert_after(&paned, Some(end));
+            }
+
+            // Hit test: line is drawn at x = 200 (width = 1px).
+            // Left of line: [194..200] (6px) picked as separator.
+            // Right of line: [201..207] (6px) picked as separator.
+            // Outside: < 194 or > 207 picked as button.
+            for x in [194.0, 196.0, 198.0, 200.0, 201.0, 204.0, 207.0] {
                 let picked = paned.pick(x, 150.0, gtk::PickFlags::DEFAULT);
                 assert_eq!(
                     picked.map(|w| w.css_name().to_string()),
@@ -1438,11 +1504,11 @@ mod tests {
             }
             // Outside the 6px margin
             assert_eq!(
-                paned.pick(190.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
+                paned.pick(193.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
                 Some("button".to_string())
             );
             assert_eq!(
-                paned.pick(210.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
+                paned.pick(208.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
                 Some("button".to_string())
             );
         });
@@ -1499,12 +1565,31 @@ mod tests {
             // Double clicking on separator (pos) should equalize to 0.5
             let pos = paned.position() as f64;
             click.emit_by_name::<()>("pressed", &[&2i32, &pos, &100.0f64]);
-            click.emit_by_name::<()>("released", &[&2i32, &pos, &100.0f64]);
             for _ in 0..10 {
                 ctx.iteration(false);
             }
             if let LayoutNode::Split { ratio, .. } = session.model.borrow().layout.root().unwrap() {
                 assert!((*ratio - 0.5).abs() < 0.01, "Ratio must be equalized to 0.5, got {}", ratio);
+            }
+
+            // Now reset back to 0.2 and test time-based double click with n_press = 1
+            let root = session.model.borrow().layout.root().unwrap().clone();
+            if let LayoutNode::Split { id, .. } = root {
+                session.model.borrow_mut().layout.set_split_ratio(id, 0.2);
+            }
+            session.apply_layout_ratios();
+            for _ in 0..5 {
+                ctx.iteration(false);
+            }
+
+            // Two single-clicks (n_press=1) within 450ms triggers time-based double click
+            click.emit_by_name::<()>("pressed", &[&1i32, &pos, &100.0f64]);
+            click.emit_by_name::<()>("pressed", &[&1i32, &pos, &100.0f64]);
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
+            if let LayoutNode::Split { ratio, .. } = session.model.borrow().layout.root().unwrap() {
+                assert!((*ratio - 0.5).abs() < 0.01, "Time-based double click must equalize to 0.5, got {}", ratio);
             }
 
             session.close();
