@@ -8,7 +8,7 @@ use libadwaita as adw;
 
 use crate::model::{
     expand_title_tokens_scoped, AppConfig, ColorScheme, Direction, DockPosition, LayoutNode,
-    LayoutTree, PaneId, PaneTitleStyle, Profile, SessionModel, SplitOrientation, TitleEditScope,
+    LayoutTree, PaneId, PaneTitleStyle, Profile, SessionModel, SplitId, SplitOrientation, TitleEditScope,
     TokenContext,
 };
 use crate::ui::terminal_pane::TerminalPane;
@@ -806,8 +806,24 @@ impl SessionView {
     }
 
     pub fn balance_layout(&self) {
-        self.model.borrow_mut().layout.balance();
-        self.rebuild_projection();
+        if let Ok(mut m) = self.model.try_borrow_mut() {
+            m.layout.balance();
+        }
+        self.apply_layout_ratios();
+        let model_clone = Rc::clone(&self.model);
+        let container_weak = self.container.downgrade();
+        glib::idle_add_local_once(move || {
+            if let Some(container) = container_weak.upgrade() {
+                let w = container.width();
+                let h = container.height();
+                let model_b = model_clone.borrow();
+                if let Some(root_node) = model_b.layout.root() {
+                    if let Some(root_widget) = container.first_child() {
+                        Self::apply_ratios_recursive(root_node, &root_widget, w, h);
+                    }
+                }
+            }
+        });
     }
 
     pub fn apply_profile(&self, profile: &Profile) {
@@ -1061,7 +1077,6 @@ impl SessionView {
                 let is_dragging = Rc::new(std::cell::Cell::new(false));
                 let just_equalized = Rc::new(std::cell::Cell::new(false));
                 let split_id = *id;
-                let split_orientation = *orientation;
                 let model_clone = Rc::clone(model);
 
                 let container_weak = container.downgrade();
@@ -1071,7 +1086,7 @@ impl SessionView {
                 let equalize_action = Rc::new(move || {
                     just_eq_action.set(true);
                     if let Ok(mut m) = model_for_equalize.try_borrow_mut() {
-                        m.layout.equalize_direction(split_orientation);
+                        m.layout.equalize_split(split_id);
                     }
                     if let Some(container) = container_weak.upgrade() {
                         let w = container.width();
@@ -1189,11 +1204,23 @@ impl SessionView {
                     click.connect_pressed(move |gesture, n_press, x, y| {
                         let Some(p) = paned_weak.upgrade() else { return; };
                         let pos = p.position() as f64;
-                        let is_on_handle = (match p.orientation() {
-                            gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
-                            gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
-                            _ => false,
-                        }) || p.pick(x, y, gtk::PickFlags::DEFAULT).map(|w| w.css_name() == "separator").unwrap_or(false);
+                        let is_on_handle = if let Some(w) = p.pick(x, y, gtk::PickFlags::DEFAULT) {
+                            if w.css_name() == "separator" {
+                                w.parent().as_ref() == Some(p.upcast_ref())
+                            } else {
+                                match p.orientation() {
+                                    gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
+                                    gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
+                                    _ => false,
+                                }
+                            }
+                        } else {
+                            match p.orientation() {
+                                gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
+                                gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
+                                _ => false,
+                            }
+                        };
 
                         if !is_on_handle {
                             return;
@@ -1262,6 +1289,27 @@ impl SessionView {
                 }
             }
         }
+    }
+
+    pub fn equalize_split(&self, split_id: SplitId) {
+        if let Ok(mut m) = self.model.try_borrow_mut() {
+            m.layout.equalize_split(split_id);
+        }
+        self.apply_layout_ratios();
+        let model_clone = Rc::clone(&self.model);
+        let container_weak = self.container.downgrade();
+        glib::idle_add_local_once(move || {
+            if let Some(container) = container_weak.upgrade() {
+                let w = container.width();
+                let h = container.height();
+                let model_b = model_clone.borrow();
+                if let Some(root_node) = model_b.layout.root() {
+                    if let Some(root_widget) = container.first_child() {
+                        Self::apply_ratios_recursive(root_node, &root_widget, w, h);
+                    }
+                }
+            }
+        });
     }
 
     pub fn equalize_direction(&self, orientation: SplitOrientation) {
@@ -1950,6 +1998,146 @@ mod tests {
 
             let root_paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
             assert_eq!(root_paned.position(), 280, "Root paned position must be 280 (70%), not reset/equalized");
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_equalize_split_orthogonal_isolation() {
+        crate::ui::window::run_gtk_test(|| {
+            let mut model = SessionModel::new(PaneId(1));
+            // Vertical split: Top (Pane 1) and Bottom (Pane 2) -> SplitId(1)
+            model.split_pane(PaneId(1), SplitOrientation::Vertical).unwrap();
+            // Split Top horizontally: Pane 1 and Pane 3 -> SplitId(2)
+            model.split_pane(PaneId(1), SplitOrientation::Horizontal).unwrap();
+            // Split Bottom horizontally: Pane 2 and Pane 4 -> SplitId(3)
+            model.split_pane(PaneId(2), SplitOrientation::Horizontal).unwrap();
+
+            // Mess up ratios
+            model.layout.set_split_ratio(SplitId(1), 0.5); // Vertical
+            model.layout.set_split_ratio(SplitId(2), 0.2); // Top horizontal
+            model.layout.set_split_ratio(SplitId(3), 0.8); // Bottom horizontal
+
+            let session = SessionView::with_model_and_dir(model, None);
+
+            // Equalize ONLY SplitId(2) (Top horizontal)
+            session.equalize_split(SplitId(2));
+
+            let m = session.model();
+            if let Some(LayoutNode::Split { first, second, .. }) = m.layout.root() {
+                // Top horizontal (first) should be equalized to 0.5
+                if let LayoutNode::Split { ratio, .. } = &**first {
+                    assert!((ratio - 0.5).abs() < 1e-6, "Top horizontal ratio should be 0.5, got {}", ratio);
+                } else {
+                    panic!("First child must be Split");
+                }
+                // Bottom horizontal (second) MUST REMAIN 0.8
+                if let LayoutNode::Split { ratio, .. } = &**second {
+                    assert!((ratio - 0.8).abs() < 1e-6, "Bottom horizontal ratio must remain 0.8, got {}", ratio);
+                } else {
+                    panic!("Second child must be Split");
+                }
+            } else {
+                panic!("Root must be Split");
+            }
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_balance_layout() {
+        crate::ui::window::run_gtk_test(|| {
+            let session = SessionView::new();
+            session.split_active(SplitOrientation::Horizontal);
+            session.split_active(SplitOrientation::Horizontal);
+            assert_eq!(session.pane_count(), 3);
+
+            // Mess up ratios in layout
+            session.model_mut().layout.set_split_ratio(SplitId(1), 0.8);
+            session.model_mut().layout.set_split_ratio(SplitId(2), 0.2);
+
+            // Call balance_layout
+            session.balance_layout();
+
+            // Model should have balanced ratios (1/3 and 1/2)
+            if let Some(LayoutNode::Split { ratio: r1, second, .. }) = session.model().layout.root() {
+                assert!((r1 - (1.0 / 3.0)).abs() < 1e-6, "Root ratio should be 1/3, got {}", r1);
+                if let LayoutNode::Split { ratio: r2, .. } = &**second {
+                    assert!((r2 - 0.5).abs() < 1e-6, "Second split ratio should be 1/2, got {}", r2);
+                } else {
+                    panic!("Expected second node to be split");
+                }
+            } else {
+                panic!("Expected root to be split");
+            }
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_equalize_cluster_three_vertical_panes_on_right() {
+        crate::ui::window::run_gtk_test(|| {
+            let mut model = SessionModel::new(PaneId(1));
+            // 1. Split Right (Pane 1 | Pane 2) -> SplitId(1) (Horizontal)
+            model.split_pane(PaneId(1), SplitOrientation::Horizontal).unwrap();
+            // 2. Split Down on Pane 2 (Pane 2 / Pane 3) -> SplitId(2) (Vertical)
+            model.split_pane(PaneId(2), SplitOrientation::Vertical).unwrap();
+            // 3. Split Down on Pane 3 (Pane 3 / Pane 4) -> SplitId(3) (Vertical)
+            model.split_pane(PaneId(3), SplitOrientation::Vertical).unwrap();
+
+            // Mess up ratios
+            model.layout.set_split_ratio(SplitId(1), 0.4); // Left pane takes 40%
+            model.layout.set_split_ratio(SplitId(2), 0.6);
+            model.layout.set_split_ratio(SplitId(3), 0.2);
+
+            let session = SessionView::with_model_and_dir(model, None);
+
+            // Equalize SplitId(3) (the divider between Pane 3 and Pane 4)
+            session.equalize_split(SplitId(3));
+
+            {
+                let m = session.model();
+                if let Some(LayoutNode::Split { ratio: r_horiz, second, .. }) = m.layout.root() {
+                    // Left pane ratio MUST REMAIN 0.4 (untouched!)
+                    assert!((r_horiz - 0.4).abs() < 1e-6, "Left pane ratio should remain 0.4, got {}", r_horiz);
+
+                    // In the right column:
+                    if let LayoutNode::Split { ratio: r2, second: sub_second, .. } = &**second {
+                        // Split 2 must be 1/3 (so Pane 2 gets 1/3)
+                        assert!((r2 - (1.0 / 3.0)).abs() < 1e-6, "Split 2 ratio should be 1/3, got {}", r2);
+
+                        if let LayoutNode::Split { ratio: r3, .. } = &**sub_second {
+                            // Split 3 must be 1/2 (so Pane 3 and 4 each get 1/3)
+                            assert!((r3 - 0.5).abs() < 1e-6, "Split 3 ratio should be 1/2, got {}", r3);
+                        } else {
+                            panic!("Expected sub_second to be Split");
+                        }
+                    } else {
+                        panic!("Expected second to be Split");
+                    }
+                } else {
+                    panic!("Expected root to be Split");
+                }
+            }
+
+            // Now mess up again and equalize SplitId(2) (the top divider between Pane 2 and Pane 3)
+            session.model_mut().layout.set_split_ratio(SplitId(2), 0.7);
+            session.model_mut().layout.set_split_ratio(SplitId(3), 0.3);
+            session.equalize_split(SplitId(2));
+
+            let m = session.model();
+            if let Some(LayoutNode::Split { ratio: r_horiz, second, .. }) = m.layout.root() {
+                assert!((r_horiz - 0.4).abs() < 1e-6, "Left pane ratio should remain 0.4");
+                if let LayoutNode::Split { ratio: r2, second: sub_second, .. } = &**second {
+                    assert!((r2 - (1.0 / 3.0)).abs() < 1e-6, "Split 2 ratio should be 1/3, got {}", r2);
+                    if let LayoutNode::Split { ratio: r3, .. } = &**sub_second {
+                        assert!((r3 - 0.5).abs() < 1e-6, "Split 3 ratio should be 1/2, got {}", r3);
+                    }
+                }
+            }
 
             session.close();
         });

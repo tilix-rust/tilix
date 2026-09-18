@@ -390,6 +390,7 @@ impl LayoutNode {
 
     fn balance(&mut self) {
         if let LayoutNode::Split {
+            orientation,
             ref mut ratio,
             ref mut first,
             ref mut second,
@@ -398,9 +399,12 @@ impl LayoutNode {
         {
             first.balance();
             second.balance();
-            let c1 = first.leaf_count() as f64;
-            let c2 = second.leaf_count() as f64;
-            *ratio = (c1 / (c1 + c2)).clamp(0.05, 0.95);
+            let c1 = first.orientation_weight(*orientation) as f64;
+            let c2 = second.orientation_weight(*orientation) as f64;
+            let total = c1 + c2;
+            if total > 0.0 {
+                *ratio = (c1 / total).clamp(0.05, 0.95);
+            }
         }
     }
 
@@ -1020,6 +1024,29 @@ mod tests {
             assert!((ratio - 1.0 / 3.0).abs() < 1e-4);
         } else {
             panic!("Expected split root");
+        }
+    }
+
+    #[test]
+    fn test_balance_mixed_orientation_layout() {
+        let mut tree = LayoutTree::new(PaneId(1));
+        // Split Horizontal -> Pane 1 | Pane 2
+        tree.split(PaneId(1), SplitOrientation::Horizontal, PaneId(2)).unwrap();
+        // Split Pane 2 Vertical -> Pane 2 / Pane 3
+        tree.split(PaneId(2), SplitOrientation::Vertical, PaneId(3)).unwrap();
+
+        tree.set_split_ratio(SplitId(1), 0.8);
+        tree.set_split_ratio(SplitId(2), 0.2);
+
+        tree.balance();
+
+        if let Some(LayoutNode::Split { ratio: r1, second, .. }) = tree.root() {
+            // Horizontal columns: Left (1 col) and Right (1 col), each gets 0.5!
+            assert!((r1 - 0.5).abs() < 1e-4, "Horizontal columns must be 50/50, got {}", r1);
+            if let LayoutNode::Split { ratio: r2, .. } = &**second {
+                // Vertical rows on right: Top and Bottom, each gets 0.5!
+                assert!((r2 - 0.5).abs() < 1e-4, "Vertical rows must be 50/50, got {}", r2);
+            }
         }
     }
 

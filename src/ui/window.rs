@@ -409,6 +409,7 @@ impl TilixWindow {
         header_bar.pack_end(&menu_btn);
 
         let app_menu = gio::Menu::new();
+        app_menu.append(Some("Balance Layout"), Some("win.balance-layout"));
         app_menu.append(Some("Preferences"), Some("win.preferences"));
         app_menu.append(Some("Save Layout..."), Some("win.save-layout"));
         app_menu.append(Some("Shortcuts"), Some("win.shortcuts"));
