@@ -791,12 +791,14 @@ impl SessionView {
         for pane in self.panes.borrow().values() {
             pane.apply_profile(profile);
         }
+        self.notify_title_changed();
     }
 
     pub fn apply_profile_to_pane(&self, pane_id: PaneId, profile: &Profile) {
         if let Some(pane) = self.panes.borrow().get(&pane_id) {
             pane.apply_profile(profile);
         }
+        self.notify_title_changed();
     }
 
     pub fn get_pane_profile(&self, pane_id: PaneId) -> Option<Profile> {

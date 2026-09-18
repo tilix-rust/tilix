@@ -45,9 +45,11 @@ fn test_phase12_measure_cell_size_vte_monospace() {
 #[test]
 fn test_phase12_cell_scale_proportionality() {
     run_gtk_test(|| {
-        let mut base_profile = Profile::default();
-        base_profile.cell_width_scale = 1.0;
-        base_profile.cell_height_scale = 1.0;
+        let base_profile = Profile {
+            cell_width_scale: 1.0,
+            cell_height_scale: 1.0,
+            ..Default::default()
+        };
         let base_size = measure_cell_size(&base_profile).expect("Base cell size");
 
         let mut scaled_profile = base_profile.clone();
@@ -115,9 +117,11 @@ fn test_phase12_calculate_window_size_simulated_hidpi_196dpi() {
 
 #[test]
 fn test_phase12_calculate_window_size_custom_grid() {
-    let mut profile = Profile::default();
-    profile.default_size_columns = 132;
-    profile.default_size_rows = 43;
+    let profile = Profile {
+        default_size_columns: 132,
+        default_size_rows: 43,
+        ..Default::default()
+    };
     let app_config = AppConfig::default();
     let (w, h) = calculate_window_size_from_cell_size(&profile, &app_config, Some((9, 20)), None);
     // Grid: 132 * 9 + 16 = 1204
@@ -195,9 +199,11 @@ fn test_phase12_screen_clamping_max_bounds() {
 
 #[test]
 fn test_phase12_screen_clamping_min_bounds() {
-    let mut profile = Profile::default();
-    profile.default_size_columns = 10;
-    profile.default_size_rows = 5;
+    let mut profile = Profile {
+        default_size_columns: 10,
+        default_size_rows: 5,
+        ..Default::default()
+    };
     let app_config = AppConfig::default();
     // Raw width: 10 * 9 + 16 = 106 (< 300)
     // Raw height: 5 * 20 + 36 + 84 = 220
@@ -253,9 +259,11 @@ fn test_phase12_tilix_window_instantiation_uses_calculated_size() {
         assert!(h >= MIN_WINDOW_HEIGHT, "Window default height {} should be >= {}", h, MIN_WINDOW_HEIGHT);
 
         // Also test new_with_profile
-        let mut custom_profile = Profile::default();
-        custom_profile.default_size_columns = 120;
-        custom_profile.default_size_rows = 40;
+        let custom_profile = Profile {
+            default_size_columns: 120,
+            default_size_rows: 40,
+            ..Default::default()
+        };
         let profile_win = TilixWindow::new_with_profile(&app, &custom_profile);
         let (pw, ph) = profile_win.window().default_size();
         assert!(pw > w, "Custom profile width {} should be greater than default {}", pw, w);

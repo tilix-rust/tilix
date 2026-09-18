@@ -307,3 +307,54 @@ fn test_phase11_focus_preserves_directory_in_title() {
     });
 }
 
+/// 10. Profile terminal title set to ${directory} correctly displays current working directory at startup.
+#[test]
+fn test_phase11_profile_terminal_title_directory_at_startup() {
+    run_gtk_test(|| {
+        let cwd = std::env::current_dir().expect("get cwd");
+        let cwd_str = cwd.to_string_lossy();
+
+        let prof = model::profile::Profile {
+            terminal_title: "${directory}".to_string(),
+            ..Default::default()
+        };
+
+        let pane = ui::terminal_pane::TerminalPane::new(model::PaneId(1), None);
+        pane.apply_profile(&prof);
+
+        // At startup with initial_directory=None, it should resolve cwd and not be empty!
+        assert_eq!(pane.title(), cwd_str);
+    });
+}
+
+/// 11. Emitting window-title-changed preserves profile.terminal_title format and ${directory}.
+#[test]
+fn test_phase11_command_title_change_preserves_profile_format() {
+    run_gtk_test(|| {
+        let test_dir = std::path::PathBuf::from("/usr/local/src");
+        let mut prof = model::profile::Profile {
+            terminal_title: "${directory} - ${title}".to_string(),
+            ..Default::default()
+        };
+
+        let pane = ui::terminal_pane::TerminalPane::new(model::PaneId(1), Some(&test_dir));
+        pane.apply_profile(&prof);
+
+        assert_eq!(pane.title(), "/usr/local/src - Terminal");
+
+        // Simulate a command running and setting VTE window title
+        pane.set_title("vim main.rs");
+        assert_eq!(pane.title(), "/usr/local/src - vim main.rs");
+
+        // When terminal_title is just ${directory}, setting a command title does not wipe directory
+        prof.terminal_title = "${directory}".to_string();
+        pane.apply_profile(&prof);
+        assert_eq!(pane.title(), "/usr/local/src");
+
+        pane.set_title("cargo build");
+        assert_eq!(pane.title(), "/usr/local/src");
+        assert_eq!(pane.raw_title(), "cargo build");
+    });
+}
+
+

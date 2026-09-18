@@ -8,9 +8,8 @@ use vte4 as vte;
 use vte::prelude::*;
 
 use crate::model::{
-    expand_badge_format, expand_title_format, ColorScheme, CursorBlinkPreference,
-    CursorShapePreference, DockPosition, ExitActionPreference, PaneId, Profile,
-    SplitOrientation, TitleTokenContext,
+    ColorScheme, CursorBlinkPreference, CursorShapePreference, DockPosition,
+    ExitActionPreference, PaneId, Profile, SplitOrientation,
 };
 use crate::pty::{default_env, detect_shell, parse_osc7_uri};
 
@@ -31,6 +30,7 @@ struct PaneWidgets {
     badge_label: gtk::Label,
     margin_line: gtk::Box,
     title_label: gtk::Label,
+    raw_title: Rc<RefCell<String>>,
 }
 
 #[derive(Clone)]
@@ -43,6 +43,7 @@ pub struct TerminalPane {
     container: gtk::Box,
     header: gtk::Box,
     title_label: gtk::Label,
+    raw_title: Rc<RefCell<String>>,
     sync_btn: gtk::ToggleButton,
     split_h_btn: gtk::Button,
     split_v_btn: gtk::Button,
@@ -76,7 +77,7 @@ impl TerminalPane {
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         header.add_css_class("terminal-pane-header");
 
-        let title_label = gtk::Label::new(Some("Terminal"));
+        let title_label = gtk::Label::new(None);
         title_label.set_halign(gtk::Align::Start);
         title_label.set_hexpand(true);
         title_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -163,17 +164,34 @@ impl TerminalPane {
         badge_label.set_visible(false);
         overlay.add_overlay(&badge_label);
 
+        let effective_dir = initial_directory
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::current_dir().ok());
+        let current_directory = Rc::new(RefCell::new(effective_dir.clone()));
+        let raw_title = Rc::new(RefCell::new("Terminal".to_string()));
+        let current_profile = Rc::new(RefCell::new(Profile::default()));
+
+        let initial_formatted_title = Self::format_pane_title(
+            &current_profile.borrow(),
+            pane_id,
+            "Terminal",
+            effective_dir.as_deref(),
+            &terminal,
+            None,
+            true,
+        );
+        title_label.set_text(&initial_formatted_title);
+
         let pane_widgets = PaneWidgets {
             terminal: terminal.clone(),
             scrollbar: scrollbar.clone(),
             badge_label: badge_label.clone(),
             margin_line: margin_line.clone(),
             title_label: title_label.clone(),
+            raw_title: Rc::clone(&raw_title),
         };
 
         let child_pid: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
-        let current_directory = Rc::new(RefCell::new(initial_directory.map(|p| p.to_path_buf())));
-        let current_profile = Rc::new(RefCell::new(Profile::default()));
         let is_sync_enabled = Rc::new(Cell::new(true));
         let is_closing = Rc::new(Cell::new(false));
         let close_callbacks: Rc<RefCell<Vec<CloseCallback>>> = Rc::new(RefCell::new(Vec::new()));
@@ -273,7 +291,7 @@ impl TerminalPane {
                     }
                     ExitActionPreference::Restart => {
                         let dir = current_dir.borrow().clone();
-                        Self::spawn_shell_process(term, &profile_rc.borrow(), dir.as_deref(), &pid_cell);
+                        Self::spawn_shell_process(term, &profile_rc.borrow(), dir.as_deref(), &pid_cell, None);
                     }
                     ExitActionPreference::Hold => {
                         let curr_title = title_lbl.text();
@@ -303,6 +321,8 @@ impl TerminalPane {
         {
             let cwd_clone = Rc::clone(&current_directory);
             let prof_rc = Rc::clone(&current_profile);
+            let pid_clone = Rc::clone(&child_pid);
+            let is_sync_clone = Rc::clone(&is_sync_enabled);
             let widgets = pane_widgets.clone();
             let callbacks = Rc::clone(&title_callbacks);
             terminal.connect_current_directory_uri_changed(move |term| {
@@ -311,18 +331,23 @@ impl TerminalPane {
                         if let Ok(mut cwd) = cwd_clone.try_borrow_mut() {
                             *cwd = Some(path.clone());
                         }
+                        Self::refresh_title_static(
+                            &widgets,
+                            &prof_rc,
+                            &cwd_clone,
+                            &pid_clone,
+                            &is_sync_clone,
+                            pane_id,
+                            &callbacks,
+                        );
                         Self::check_auto_switch_static(
                             &prof_rc,
                             Some(&path),
                             pane_id,
                             &widgets,
+                            pid_clone.get(),
+                            is_sync_clone.get(),
                         );
-                        if let Ok(list) = callbacks.try_borrow() {
-                            let title = term.window_title().map(|s| s.to_string()).unwrap_or_else(|| "Terminal".to_string());
-                            for cb in list.iter() {
-                                cb(pane_id, &title);
-                            }
-                        }
                     }
                 }
             });
@@ -330,35 +355,57 @@ impl TerminalPane {
 
         // Wire window title change and automatic switch evaluation
         {
-            let label_clone = title_label.clone();
             let callbacks = Rc::clone(&title_callbacks);
             let prof_rc = Rc::clone(&current_profile);
             let cwd_clone = Rc::clone(&current_directory);
+            let pid_clone = Rc::clone(&child_pid);
+            let is_sync_clone = Rc::clone(&is_sync_enabled);
             let widgets = pane_widgets.clone();
             terminal.connect_window_title_changed(move |term| {
                 if let Some(title) = term.window_title() {
-                    label_clone.set_text(&title);
-                    if let Ok(list) = callbacks.try_borrow() {
-                        for cb in list.iter() {
-                            cb(pane_id, &title);
-                        }
-                    }
-                    let dir = cwd_clone.borrow().clone();
-                    Self::check_auto_switch_static(
-                        &prof_rc,
-                        dir.as_deref(),
-                        pane_id,
-                        &widgets,
-                    );
+                    *widgets.raw_title.borrow_mut() = title.to_string();
                 }
+                Self::refresh_title_static(
+                    &widgets,
+                    &prof_rc,
+                    &cwd_clone,
+                    &pid_clone,
+                    &is_sync_clone,
+                    pane_id,
+                    &callbacks,
+                );
+                let dir = cwd_clone.borrow().clone();
+                Self::check_auto_switch_static(
+                    &prof_rc,
+                    dir.as_deref(),
+                    pane_id,
+                    &widgets,
+                    pid_clone.get(),
+                    is_sync_clone.get(),
+                );
             });
         }
 
         // Wire focus notification
         {
             let callbacks = Rc::clone(&focus_callbacks);
+            let prof_rc = Rc::clone(&current_profile);
+            let cwd_clone = Rc::clone(&current_directory);
+            let pid_clone = Rc::clone(&child_pid);
+            let is_sync_clone = Rc::clone(&is_sync_enabled);
+            let title_cbs = Rc::clone(&title_callbacks);
+            let widgets = pane_widgets.clone();
             let focus_ctrl = gtk::EventControllerFocus::new();
             focus_ctrl.connect_enter(move |_| {
+                Self::refresh_title_static(
+                    &widgets,
+                    &prof_rc,
+                    &cwd_clone,
+                    &pid_clone,
+                    &is_sync_clone,
+                    pane_id,
+                    &title_cbs,
+                );
                 if let Ok(list) = callbacks.try_borrow() {
                     for cb in list.iter() {
                         cb(pane_id);
@@ -380,8 +427,41 @@ impl TerminalPane {
             });
         }
 
-        // Spawn initial shell process asynchronously
-        Self::spawn_shell_process(&terminal, &current_profile.borrow(), initial_directory, &child_pid);
+        // Spawn initial shell process asynchronously and wire title refresh on spawn
+        {
+            let prof_rc = Rc::clone(&current_profile);
+            let cwd_clone = Rc::clone(&current_directory);
+            let pid_clone = Rc::clone(&child_pid);
+            let is_sync_clone = Rc::clone(&is_sync_enabled);
+            let title_cbs = Rc::clone(&title_callbacks);
+            let widgets = pane_widgets.clone();
+            Self::spawn_shell_process(
+                &terminal,
+                &current_profile.borrow(),
+                effective_dir.as_deref(),
+                &child_pid,
+                Some(Box::new(move |pid| {
+                    Self::refresh_title_static(
+                        &widgets,
+                        &prof_rc,
+                        &cwd_clone,
+                        &pid_clone,
+                        &is_sync_clone,
+                        pane_id,
+                        &title_cbs,
+                    );
+                    let dir = cwd_clone.borrow().clone();
+                    Self::check_auto_switch_static(
+                        &prof_rc,
+                        dir.as_deref(),
+                        pane_id,
+                        &widgets,
+                        Some(pid),
+                        is_sync_clone.get(),
+                    );
+                })),
+            );
+        }
 
         Self {
             overlay,
@@ -392,6 +472,7 @@ impl TerminalPane {
             container,
             header,
             title_label,
+            raw_title,
             sync_btn,
             split_h_btn,
             split_v_btn,
@@ -417,11 +498,138 @@ impl TerminalPane {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn get_foreground_pid_linux(shell_pid: i32) -> Option<i32> {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", shell_pid)).ok()?;
+        let rparen = stat.rfind(')')?;
+        let rest = &stat[rparen + 1..];
+        let mut parts = rest.split_whitespace();
+        let tpgid_str = parts.nth(5)?;
+        let tpgid: i32 = tpgid_str.parse().ok()?;
+        if tpgid > 0 {
+            Some(tpgid)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_foreground_cwd_linux(shell_pid: i32) -> Option<PathBuf> {
+        if let Some(fg_pid) = Self::get_foreground_pid_linux(shell_pid) {
+            if let Ok(target) = std::fs::read_link(format!("/proc/{}/cwd", fg_pid)) {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_foreground_comm_linux(shell_pid: i32) -> Option<String> {
+        let target_pid = Self::get_foreground_pid_linux(shell_pid).unwrap_or(shell_pid);
+        std::fs::read_to_string(format!("/proc/{}/comm", target_pid))
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    fn resolve_directory(
+        cached_dir: &Rc<RefCell<Option<PathBuf>>>,
+        child_pid: Option<i32>,
+    ) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = child_pid {
+            if let Some(fg_cwd) = Self::get_foreground_cwd_linux(pid) {
+                if let Ok(mut c) = cached_dir.try_borrow_mut() {
+                    *c = Some(fg_cwd.clone());
+                }
+                return Some(fg_cwd);
+            }
+            if let Ok(target) = std::fs::read_link(format!("/proc/{}/cwd", pid)) {
+                if let Ok(mut c) = cached_dir.try_borrow_mut() {
+                    *c = Some(target.clone());
+                }
+                return Some(target);
+            }
+        }
+        if let Ok(c) = cached_dir.try_borrow() {
+            if let Some(ref dir) = *c {
+                return Some(dir.clone());
+            }
+        }
+        std::env::current_dir().ok()
+    }
+
+    fn format_pane_title(
+        profile: &Profile,
+        pane_id: PaneId,
+        raw_title: &str,
+        directory: Option<&Path>,
+        terminal: &vte::Terminal,
+        child_pid: Option<i32>,
+        is_sync: bool,
+    ) -> String {
+        let mut token_ctx = crate::model::title::TokenContext::new_terminal(raw_title);
+        token_ctx.id = Some(pane_id.0);
+        token_ctx.profile_name = Some(profile.name.clone());
+        token_ctx.directory = directory.map(|d| d.to_path_buf());
+        token_ctx.app_name = Some("Tilix".to_string());
+        let cols = terminal.column_count();
+        let rows = terminal.row_count();
+        if cols > 0 {
+            token_ctx.columns = Some(cols as u32);
+        }
+        if rows > 0 {
+            token_ctx.rows = Some(rows as u32);
+        }
+        token_ctx.input_sync = is_sync;
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = child_pid {
+            if let Some(comm) = Self::get_foreground_comm_linux(pid) {
+                token_ctx.process = Some(comm);
+            }
+        }
+        crate::model::title::expand_title_tokens_scoped(
+            &profile.terminal_title,
+            crate::model::title::TitleEditScope::Terminal,
+            &token_ctx,
+        )
+    }
+
+    fn refresh_title_static(
+        widgets: &PaneWidgets,
+        profile_rc: &Rc<RefCell<Profile>>,
+        cwd_rc: &Rc<RefCell<Option<PathBuf>>>,
+        pid_cell: &Rc<Cell<Option<i32>>>,
+        is_sync_cell: &Rc<Cell<bool>>,
+        pane_id: PaneId,
+        callbacks: &Rc<RefCell<Vec<TitleCallback>>>,
+    ) -> String {
+        let raw = widgets.raw_title.borrow().clone();
+        let dir = Self::resolve_directory(cwd_rc, pid_cell.get());
+        let prof = profile_rc.borrow().clone();
+        let expanded = Self::format_pane_title(
+            &prof,
+            pane_id,
+            &raw,
+            dir.as_deref(),
+            &widgets.terminal,
+            pid_cell.get(),
+            is_sync_cell.get(),
+        );
+        widgets.title_label.set_text(&expanded);
+        if let Ok(list) = callbacks.try_borrow() {
+            for cb in list.iter() {
+                cb(pane_id, &expanded);
+            }
+        }
+        expanded
+    }
+
     fn spawn_shell_process(
         terminal: &vte::Terminal,
         profile: &Profile,
         directory: Option<&Path>,
         child_pid: &Rc<Cell<Option<i32>>>,
+        on_spawned: Option<Box<dyn Fn(i32)>>,
     ) {
         let shell = detect_shell();
         let env_vars = default_env();
@@ -444,6 +652,9 @@ impl TerminalPane {
                 match res {
                     Ok(pid) => {
                         pid_cell.set(Some(pid.0));
+                        if let Some(ref cb) = on_spawned {
+                            cb(pid.0);
+                        }
                     }
                     Err(e) => {
                         glib::g_warning!("Tilix", "Failed to spawn shell: {}", e);
@@ -458,6 +669,8 @@ impl TerminalPane {
         directory: Option<&Path>,
         pane_id: PaneId,
         widgets: &PaneWidgets,
+        child_pid: Option<i32>,
+        is_sync: bool,
     ) {
         let curr_prof = profile_rc.borrow().clone();
         if curr_prof.automatic_switch.is_empty() {
@@ -471,11 +684,15 @@ impl TerminalPane {
                 let cfg = crate::model::AppConfig::load();
                 if let Some(target) = cfg.get_profile(&rule.profile_id) {
                     *profile_rc.borrow_mut() = target.clone();
+                    let raw = widgets.raw_title.borrow().clone();
                     Self::apply_profile_to_widgets(
                         target,
                         pane_id,
+                        &raw,
                         directory,
                         widgets,
+                        child_pid,
+                        is_sync,
                     );
                     break;
                 }
@@ -584,7 +801,32 @@ impl TerminalPane {
     }
 
     pub fn set_title(&self, title: &str) {
-        self.title_label.set_text(title);
+        *self.raw_title.borrow_mut() = title.to_string();
+        self.refresh_title();
+    }
+
+    pub fn raw_title(&self) -> String {
+        self.raw_title.borrow().clone()
+    }
+
+    pub fn refresh_title(&self) -> String {
+        let widgets = PaneWidgets {
+            terminal: self.terminal.clone(),
+            scrollbar: self.scrollbar.clone(),
+            badge_label: self.badge_label.clone(),
+            margin_line: self.margin_line.clone(),
+            title_label: self.title_label.clone(),
+            raw_title: Rc::clone(&self.raw_title),
+        };
+        Self::refresh_title_static(
+            &widgets,
+            &self.current_profile,
+            &self.current_directory,
+            &self.child_pid,
+            &self.is_sync_enabled,
+            self.pane_id,
+            &self.title_callbacks,
+        )
     }
 
     pub fn grab_focus(&self) {
@@ -652,8 +894,11 @@ impl TerminalPane {
     fn apply_profile_to_widgets(
         profile: &Profile,
         pane_id: PaneId,
+        raw_title: &str,
         directory: Option<&Path>,
         widgets: &PaneWidgets,
+        child_pid: Option<i32>,
+        is_sync: bool,
     ) {
         widgets.scrollbar.set_visible(profile.show_scrollbar);
 
@@ -790,25 +1035,47 @@ impl TerminalPane {
         // Margin guide line
         widgets.margin_line.set_visible(profile.draw_margin > 0);
 
-        // Token expansion context
-        let current_title = widgets.title_label.text().to_string();
-        let ctx = TitleTokenContext {
-            id: pane_id.0,
-            title: &current_title,
-            profile_name: &profile.name,
-            directory,
-            app_name: "Tilix",
-        };
-
         // Title format
-        let expanded_title = expand_title_format(&profile.terminal_title, &ctx);
+        let expanded_title = Self::format_pane_title(
+            profile,
+            pane_id,
+            raw_title,
+            directory,
+            &widgets.terminal,
+            child_pid,
+            is_sync,
+        );
         widgets.title_label.set_text(&expanded_title);
 
         // Badge overlay
         if profile.badge_text.trim().is_empty() {
             widgets.badge_label.set_visible(false);
         } else {
-            let expanded_badge = expand_badge_format(&profile.badge_text, &ctx);
+            let mut token_ctx = crate::model::title::TokenContext::new_terminal(raw_title);
+            token_ctx.id = Some(pane_id.0);
+            token_ctx.profile_name = Some(profile.name.clone());
+            token_ctx.directory = directory.map(|d| d.to_path_buf());
+            token_ctx.app_name = Some("Tilix".to_string());
+            let cols = widgets.terminal.column_count();
+            let rows = widgets.terminal.row_count();
+            if cols > 0 {
+                token_ctx.columns = Some(cols as u32);
+            }
+            if rows > 0 {
+                token_ctx.rows = Some(rows as u32);
+            }
+            token_ctx.input_sync = is_sync;
+            #[cfg(target_os = "linux")]
+            if let Some(pid) = child_pid {
+                if let Some(comm) = Self::get_foreground_comm_linux(pid) {
+                    token_ctx.process = Some(comm);
+                }
+            }
+            let expanded_badge = crate::model::title::expand_title_tokens_scoped(
+                &profile.badge_text,
+                crate::model::title::TitleEditScope::Terminal,
+                &token_ctx,
+            );
             widgets.badge_label.set_text(&expanded_badge);
             match profile.badge_position {
                 crate::model::BadgePosition::Northwest => {
@@ -841,13 +1108,24 @@ impl TerminalPane {
             badge_label: self.badge_label.clone(),
             margin_line: self.margin_line.clone(),
             title_label: self.title_label.clone(),
+            raw_title: Rc::clone(&self.raw_title),
         };
+        let raw = self.raw_title.borrow().clone();
         Self::apply_profile_to_widgets(
             profile,
             self.pane_id,
+            &raw,
             dir.as_deref(),
             &widgets,
+            self.child_pid.get(),
+            self.is_sync_enabled.get(),
         );
+        let expanded = self.title_label.text().to_string();
+        if let Ok(list) = self.title_callbacks.try_borrow() {
+            for cb in list.iter() {
+                cb(self.pane_id, &expanded);
+            }
+        }
     }
 
     pub fn check_automatic_profile_switching(&self) {
@@ -871,20 +1149,12 @@ impl TerminalPane {
     }
 
     pub fn current_directory(&self) -> Option<PathBuf> {
-        if let Some(dir) = self.current_directory.borrow().clone() {
-            return Some(dir);
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(pid) = self.child_pid.get() {
-            if let Ok(target) = std::fs::read_link(format!("/proc/{}/cwd", pid)) {
-                return Some(target);
-            }
-        }
-        None
+        Self::resolve_directory(&self.current_directory, self.child_pid.get())
     }
 
     pub fn set_current_directory(&self, dir: Option<PathBuf>) {
         *self.current_directory.borrow_mut() = dir;
+        self.refresh_title();
     }
 
     pub fn child_pid(&self) -> Option<i32> {

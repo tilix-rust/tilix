@@ -609,9 +609,16 @@ impl TilixWindow {
     }
 
     pub fn create_tab(&self) -> (adw::TabPage, Rc<RefCell<SessionView>>) {
-        let initial_dir = self.tab_view.selected_page().and_then(|page| {
-            self.sessions.borrow().get(&page).and_then(|s| s.borrow().active_current_directory())
-        });
+        let initial_dir = self
+            .tab_view
+            .selected_page()
+            .and_then(|page| {
+                self.sessions
+                    .borrow()
+                    .get(&page)
+                    .and_then(|s| s.borrow().active_current_directory())
+            })
+            .or_else(|| std::env::current_dir().ok());
         Self::create_tab_internal(
             &self.tab_view,
             &self.sessions,
@@ -775,9 +782,12 @@ impl TilixWindow {
             action.connect_activate(move |_, _| {
                 let Some(tv) = tv_weak.upgrade() else { return; };
 
-                let initial_dir = tv.selected_page().and_then(|page| {
-                    sessions.borrow().get(&page).and_then(|s| s.borrow().active_current_directory())
-                });
+                let initial_dir = tv
+                    .selected_page()
+                    .and_then(|page| {
+                        sessions.borrow().get(&page).and_then(|s| s.borrow().active_current_directory())
+                    })
+                    .or_else(|| std::env::current_dir().ok());
 
                 Self::create_tab_internal(&tv, &sessions, &next_id, None, initial_dir.as_deref());
             });
