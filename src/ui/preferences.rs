@@ -481,7 +481,8 @@ impl TilixPreferencesWindow {
             window.set_modal(false);
         }
         window.set_title(Some("Preferences"));
-        window.set_default_size(750, 680);
+        window.set_default_size(900, 820);
+        window.set_size_request(820, 600);
 
         let current_config = Rc::new(RefCell::new(AppConfig::load()));
         let on_change = Rc::new(on_profile_changed);
@@ -534,12 +535,12 @@ impl TilixPreferencesWindow {
         // 1. General Tab
         // -------------------------------------------------------------------------
         let gen_grid = gtk::Grid::new();
-        gen_grid.set_column_spacing(12);
+        gen_grid.set_column_spacing(16);
         gen_grid.set_row_spacing(8);
-        gen_grid.set_margin_start(16);
-        gen_grid.set_margin_end(16);
-        gen_grid.set_margin_top(16);
-        gen_grid.set_margin_bottom(16);
+        gen_grid.set_margin_start(24);
+        gen_grid.set_margin_end(24);
+        gen_grid.set_margin_top(14);
+        gen_grid.set_margin_bottom(14);
 
         // Profile name
         let name_lbl = gtk::Label::new(Some("Profile name"));
@@ -555,6 +556,7 @@ impl TilixPreferencesWindow {
         title_lbl.set_halign(gtk::Align::End);
         title_lbl.set_xalign(1.0);
         let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        title_box.add_css_class("linked");
         let title_entry = gtk::Entry::new();
         title_entry.set_hexpand(true);
         let title_token_btn = create_scoped_token_menu_button(&title_entry, TitleEditScope::Terminal);
@@ -566,9 +568,11 @@ impl TilixPreferencesWindow {
         // Section Text Appearance
         let text_app_lbl = gtk::Label::new(None);
         text_app_lbl.set_markup("<b>Text Appearance</b>");
+        text_app_lbl.add_css_class("heading");
         text_app_lbl.set_halign(gtk::Align::Start);
         text_app_lbl.set_xalign(0.0);
-        text_app_lbl.set_margin_top(10);
+        text_app_lbl.set_margin_top(12);
+        text_app_lbl.set_margin_bottom(4);
         gen_grid.attach(&text_app_lbl, 0, 2, 2, 1);
 
         // Terminal size
@@ -578,9 +582,11 @@ impl TilixPreferencesWindow {
         let size_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let cols_adj = gtk::Adjustment::new(80.0, 20.0, 500.0, 1.0, 10.0, 0.0);
         let cols_spin = gtk::SpinButton::new(Some(&cols_adj), 1.0, 0);
+        cols_spin.set_size_request(85, -1);
         let cols_lbl = gtk::Label::new(Some("columns"));
         let rows_adj = gtk::Adjustment::new(24.0, 5.0, 200.0, 1.0, 5.0, 0.0);
         let rows_spin = gtk::SpinButton::new(Some(&rows_adj), 1.0, 0);
+        rows_spin.set_size_request(85, -1);
         let rows_lbl = gtk::Label::new(Some("rows"));
         let size_reset_btn = gtk::Button::with_label("Reset");
         size_box.append(&cols_spin);
@@ -598,9 +604,11 @@ impl TilixPreferencesWindow {
         let spacing_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let cell_w_adj = gtk::Adjustment::new(1.0, 0.5, 2.0, 0.1, 0.2, 0.0);
         let cell_w_spin = gtk::SpinButton::new(Some(&cell_w_adj), 0.1, 1);
+        cell_w_spin.set_size_request(85, -1);
         let cell_w_lbl = gtk::Label::new(Some("width"));
         let cell_h_adj = gtk::Adjustment::new(1.0, 0.5, 2.0, 0.1, 0.2, 0.0);
         let cell_h_spin = gtk::SpinButton::new(Some(&cell_h_adj), 0.1, 1);
+        cell_h_spin.set_size_request(85, -1);
         let cell_h_lbl = gtk::Label::new(Some("height"));
         let spacing_reset_btn = gtk::Button::with_label("Reset");
         spacing_box.append(&cell_w_spin);
@@ -617,6 +625,8 @@ impl TilixPreferencesWindow {
         margin_lbl.set_xalign(1.0);
         let margin_adj = gtk::Adjustment::new(80.0, 0.0, 500.0, 1.0, 10.0, 0.0);
         let margin_spin = gtk::SpinButton::new(Some(&margin_adj), 1.0, 0);
+        margin_spin.set_halign(gtk::Align::Start);
+        margin_spin.set_size_request(120, -1);
         gen_grid.attach(&margin_lbl, 0, 5, 1, 1);
         gen_grid.attach(&margin_spin, 1, 5, 1, 1);
 
@@ -627,6 +637,8 @@ impl TilixPreferencesWindow {
         let blink_names = ["Never", "Focused", "Unfocused", "Always"];
         let blink_model = gtk::StringList::new(&blink_names);
         let blink_combo = gtk::DropDown::new(Some(blink_model), gtk::Expression::NONE);
+        blink_combo.set_halign(gtk::Align::Start);
+        blink_combo.set_size_request(220, -1);
         gen_grid.attach(&blink_lbl, 0, 6, 1, 1);
         gen_grid.attach(&blink_combo, 1, 6, 1, 1);
 
@@ -635,6 +647,7 @@ impl TilixPreferencesWindow {
         custom_font_lbl.set_halign(gtk::Align::End);
         custom_font_lbl.set_xalign(1.0);
         let font_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        font_box.set_halign(gtk::Align::Start);
         let custom_font_check = gtk::CheckButton::new();
         let font_btn = create_font_button();
         font_box.append(&custom_font_check);
@@ -654,9 +667,11 @@ impl TilixPreferencesWindow {
         // Section Cursor
         let cursor_sec_lbl = gtk::Label::new(None);
         cursor_sec_lbl.set_markup("<b>Cursor</b>");
+        cursor_sec_lbl.add_css_class("heading");
         cursor_sec_lbl.set_halign(gtk::Align::Start);
         cursor_sec_lbl.set_xalign(0.0);
-        cursor_sec_lbl.set_margin_top(10);
+        cursor_sec_lbl.set_margin_top(12);
+        cursor_sec_lbl.set_margin_bottom(4);
         gen_grid.attach(&cursor_sec_lbl, 0, 9, 2, 1);
 
         // Cursor shape
@@ -666,6 +681,8 @@ impl TilixPreferencesWindow {
         let shape_names = ["Block", "I-Beam", "Underline"];
         let shape_model = gtk::StringList::new(&shape_names);
         let cursor_shape_combo = gtk::DropDown::new(Some(shape_model), gtk::Expression::NONE);
+        cursor_shape_combo.set_halign(gtk::Align::Start);
+        cursor_shape_combo.set_size_request(220, -1);
         gen_grid.attach(&cursor_shape_lbl, 0, 10, 1, 1);
         gen_grid.attach(&cursor_shape_combo, 1, 10, 1, 1);
 
@@ -676,15 +693,19 @@ impl TilixPreferencesWindow {
         let cblink_names = ["System", "On", "Off"];
         let cblink_model = gtk::StringList::new(&cblink_names);
         let cursor_blink_combo = gtk::DropDown::new(Some(cblink_model), gtk::Expression::NONE);
+        cursor_blink_combo.set_halign(gtk::Align::Start);
+        cursor_blink_combo.set_size_request(220, -1);
         gen_grid.attach(&cursor_blink_lbl, 0, 11, 1, 1);
         gen_grid.attach(&cursor_blink_combo, 1, 11, 1, 1);
 
         // Section Notification
         let notif_sec_lbl = gtk::Label::new(None);
         notif_sec_lbl.set_markup("<b>Notification</b>");
+        notif_sec_lbl.add_css_class("heading");
         notif_sec_lbl.set_halign(gtk::Align::Start);
         notif_sec_lbl.set_xalign(0.0);
-        notif_sec_lbl.set_margin_top(10);
+        notif_sec_lbl.set_margin_top(12);
+        notif_sec_lbl.set_margin_bottom(4);
         gen_grid.attach(&notif_sec_lbl, 0, 12, 2, 1);
 
         // Terminal bell
@@ -694,19 +715,27 @@ impl TilixPreferencesWindow {
         let bell_names = ["None", "Sound", "Icon", "Icon and sound"];
         let bell_model = gtk::StringList::new(&bell_names);
         let bell_combo = gtk::DropDown::new(Some(bell_model), gtk::Expression::NONE);
+        bell_combo.set_halign(gtk::Align::Start);
+        bell_combo.set_size_request(220, -1);
         gen_grid.attach(&bell_lbl, 0, 13, 1, 1);
         gen_grid.attach(&bell_combo, 1, 13, 1, 1);
 
-        let gen_scrolled = gtk::ScrolledWindow::new();
-        gen_scrolled.set_child(Some(&gen_grid));
+        let gen_scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&gen_grid)
+            .build();
         notebook.append_page(&gen_scrolled, Some(&gtk::Label::new(Some("General"))));
 
         // -------------------------------------------------------------------------
         // 2. Command Tab
         // -------------------------------------------------------------------------
-        let cmd_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        cmd_box.set_margin_start(16);
-        cmd_box.set_margin_end(16);
+        let cmd_box = gtk::Box::new(gtk::Orientation::Vertical, 14);
+        cmd_box.set_margin_start(20);
+        cmd_box.set_margin_end(20);
         cmd_box.set_margin_top(16);
         cmd_box.set_margin_bottom(16);
 
@@ -714,7 +743,7 @@ impl TilixPreferencesWindow {
         let custom_cmd_check = gtk::CheckButton::with_label("Run a custom command instead of my shell");
 
         let custom_cmd_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        custom_cmd_box.set_margin_start(24);
+        custom_cmd_box.set_margin_start(28);
         let custom_cmd_lbl = gtk::Label::new(Some("Command"));
         let custom_cmd_entry = gtk::Entry::new();
         custom_cmd_entry.set_hexpand(true);
@@ -726,6 +755,8 @@ impl TilixPreferencesWindow {
         let exit_names = ["Exit the terminal", "Restart the command", "Hold the terminal open"];
         let exit_model = gtk::StringList::new(&exit_names);
         let exit_action_combo = gtk::DropDown::new(Some(exit_model), gtk::Expression::NONE);
+        exit_action_combo.set_halign(gtk::Align::Start);
+        exit_action_combo.set_size_request(240, -1);
         exit_box.append(&exit_lbl);
         exit_box.append(&exit_action_combo);
 
@@ -734,14 +765,22 @@ impl TilixPreferencesWindow {
         cmd_box.append(&custom_cmd_box);
         cmd_box.append(&exit_box);
 
-        notebook.append_page(&cmd_box, Some(&gtk::Label::new(Some("Command"))));
+        let cmd_scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&cmd_box)
+            .build();
+        notebook.append_page(&cmd_scrolled, Some(&gtk::Label::new(Some("Command"))));
 
         // -------------------------------------------------------------------------
         // 3. Color Tab
         // -------------------------------------------------------------------------
-        let color_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        color_box.set_margin_start(16);
-        color_box.set_margin_end(16);
+        let color_box = gtk::Box::new(gtk::Orientation::Vertical, 14);
+        color_box.set_margin_start(20);
+        color_box.set_margin_end(20);
         color_box.set_margin_top(16);
         color_box.set_margin_bottom(16);
 
@@ -763,6 +802,7 @@ impl TilixPreferencesWindow {
         let pal_section_box = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         let pal_title_lbl = gtk::Label::new(None);
         pal_title_lbl.set_markup("<b>Color palette</b>");
+        pal_title_lbl.add_css_class("heading");
         pal_title_lbl.set_valign(gtk::Align::Start);
         pal_section_box.append(&pal_title_lbl);
 
@@ -843,6 +883,7 @@ impl TilixPreferencesWindow {
         // Options section
         let opt_title_lbl = gtk::Label::new(None);
         opt_title_lbl.set_markup("<b>Options</b>");
+        opt_title_lbl.add_css_class("heading");
         opt_title_lbl.set_halign(gtk::Align::Start);
         color_box.append(&opt_title_lbl);
 
@@ -922,16 +963,22 @@ impl TilixPreferencesWindow {
 
         color_box.append(&slider_grid);
 
-        let color_scrolled = gtk::ScrolledWindow::new();
-        color_scrolled.set_child(Some(&color_box));
+        let color_scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&color_box)
+            .build();
         notebook.append_page(&color_scrolled, Some(&gtk::Label::new(Some("Color"))));
 
         // -------------------------------------------------------------------------
         // 4. Scrolling Tab
         // -------------------------------------------------------------------------
-        let scroll_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        scroll_box.set_margin_start(16);
-        scroll_box.set_margin_end(16);
+        let scroll_box = gtk::Box::new(gtk::Orientation::Vertical, 14);
+        scroll_box.set_margin_start(20);
+        scroll_box.set_margin_end(20);
         scroll_box.set_margin_top(16);
         scroll_box.set_margin_bottom(16);
 
@@ -943,6 +990,8 @@ impl TilixPreferencesWindow {
         let limit_scroll_check = gtk::CheckButton::with_label("Limit scrollback to:");
         let scroll_lines_adj = gtk::Adjustment::new(8192.0, 100.0, 100000.0, 500.0, 1000.0, 0.0);
         let scroll_lines_spin = gtk::SpinButton::new(Some(&scroll_lines_adj), 1.0, 0);
+        scroll_lines_spin.set_halign(gtk::Align::Start);
+        scroll_lines_spin.set_size_request(140, -1);
         limit_scroll_box.append(&limit_scroll_check);
         limit_scroll_box.append(&scroll_lines_spin);
 
@@ -951,16 +1000,24 @@ impl TilixPreferencesWindow {
         scroll_box.append(&scroll_key_check);
         scroll_box.append(&limit_scroll_box);
 
-        notebook.append_page(&scroll_box, Some(&gtk::Label::new(Some("Scrolling"))));
+        let scroll_scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&scroll_box)
+            .build();
+        notebook.append_page(&scroll_scrolled, Some(&gtk::Label::new(Some("Scrolling"))));
 
         // -------------------------------------------------------------------------
         // 5. Compatibility Tab
         // -------------------------------------------------------------------------
         let compat_grid = gtk::Grid::new();
-        compat_grid.set_column_spacing(12);
-        compat_grid.set_row_spacing(10);
-        compat_grid.set_margin_start(16);
-        compat_grid.set_margin_end(16);
+        compat_grid.set_column_spacing(16);
+        compat_grid.set_row_spacing(12);
+        compat_grid.set_margin_start(20);
+        compat_grid.set_margin_end(20);
         compat_grid.set_margin_top(16);
         compat_grid.set_margin_bottom(16);
 
@@ -977,6 +1034,8 @@ impl TilixPreferencesWindow {
         bs_lbl.set_xalign(1.0);
         let bs_model = gtk::StringList::new(&erase_names);
         let backspace_combo = gtk::DropDown::new(Some(bs_model), gtk::Expression::NONE);
+        backspace_combo.set_halign(gtk::Align::Start);
+        backspace_combo.set_size_request(240, -1);
         compat_grid.attach(&bs_lbl, 0, 0, 1, 1);
         compat_grid.attach(&backspace_combo, 1, 0, 1, 1);
 
@@ -985,6 +1044,8 @@ impl TilixPreferencesWindow {
         del_lbl.set_xalign(1.0);
         let del_model = gtk::StringList::new(&erase_names);
         let delete_combo = gtk::DropDown::new(Some(del_model), gtk::Expression::NONE);
+        delete_combo.set_halign(gtk::Align::Start);
+        delete_combo.set_size_request(240, -1);
         compat_grid.attach(&del_lbl, 0, 1, 1, 1);
         compat_grid.attach(&delete_combo, 1, 1, 1, 1);
 
@@ -994,6 +1055,8 @@ impl TilixPreferencesWindow {
         let enc_names = ["UTF-8 Unicode", "ISO-8859-1", "Windows-1252", "US-ASCII"];
         let enc_model = gtk::StringList::new(&enc_names);
         let encoding_combo = gtk::DropDown::new(Some(enc_model), gtk::Expression::NONE);
+        encoding_combo.set_halign(gtk::Align::Start);
+        encoding_combo.set_size_request(240, -1);
         compat_grid.attach(&enc_lbl, 0, 2, 1, 1);
         compat_grid.attach(&encoding_combo, 1, 2, 1, 1);
 
@@ -1003,19 +1066,29 @@ impl TilixPreferencesWindow {
         let cjk_names = ["Narrow", "Wide"];
         let cjk_model = gtk::StringList::new(&cjk_names);
         let cjk_combo = gtk::DropDown::new(Some(cjk_model), gtk::Expression::NONE);
+        cjk_combo.set_halign(gtk::Align::Start);
+        cjk_combo.set_size_request(240, -1);
         compat_grid.attach(&cjk_lbl, 0, 3, 1, 1);
         compat_grid.attach(&cjk_combo, 1, 3, 1, 1);
 
-        notebook.append_page(&compat_grid, Some(&gtk::Label::new(Some("Compatibility"))));
+        let compat_scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&compat_grid)
+            .build();
+        notebook.append_page(&compat_scrolled, Some(&gtk::Label::new(Some("Compatibility"))));
 
         // -------------------------------------------------------------------------
         // 6. Badge Tab
         // -------------------------------------------------------------------------
         let badge_grid = gtk::Grid::new();
-        badge_grid.set_column_spacing(12);
-        badge_grid.set_row_spacing(10);
-        badge_grid.set_margin_start(16);
-        badge_grid.set_margin_end(16);
+        badge_grid.set_column_spacing(16);
+        badge_grid.set_row_spacing(12);
+        badge_grid.set_margin_start(20);
+        badge_grid.set_margin_end(20);
         badge_grid.set_margin_top(16);
         badge_grid.set_margin_bottom(16);
 
@@ -1023,6 +1096,7 @@ impl TilixPreferencesWindow {
         badge_lbl.set_halign(gtk::Align::End);
         badge_lbl.set_xalign(1.0);
         let badge_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        badge_box.add_css_class("linked");
         let badge_entry = gtk::Entry::new();
         badge_entry.set_hexpand(true);
         let badge_token_btn = create_scoped_token_menu_button(&badge_entry, TitleEditScope::Terminal);
@@ -1037,6 +1111,8 @@ impl TilixPreferencesWindow {
         let badge_pos_names = ["Northwest", "Northeast", "Southwest", "Southeast"];
         let badge_pos_model = gtk::StringList::new(&badge_pos_names);
         let badge_pos_combo = gtk::DropDown::new(Some(badge_pos_model), gtk::Expression::NONE);
+        badge_pos_combo.set_halign(gtk::Align::Start);
+        badge_pos_combo.set_size_request(240, -1);
         badge_grid.attach(&badge_pos_lbl, 0, 1, 1, 1);
         badge_grid.attach(&badge_pos_combo, 1, 1, 1, 1);
 
@@ -1044,6 +1120,7 @@ impl TilixPreferencesWindow {
         badge_font_lbl.set_halign(gtk::Align::End);
         badge_font_lbl.set_xalign(1.0);
         let badge_font_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        badge_font_box.set_halign(gtk::Align::Start);
         let badge_font_check = gtk::CheckButton::new();
         let badge_font_btn = create_font_button();
         badge_font_box.append(&badge_font_check);
@@ -1051,20 +1128,29 @@ impl TilixPreferencesWindow {
         badge_grid.attach(&badge_font_lbl, 0, 2, 1, 1);
         badge_grid.attach(&badge_font_box, 1, 2, 1, 1);
 
-        notebook.append_page(&badge_grid, Some(&gtk::Label::new(Some("Badge"))));
+        let badge_scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&badge_grid)
+            .build();
+        notebook.append_page(&badge_scrolled, Some(&gtk::Label::new(Some("Badge"))));
 
         // -------------------------------------------------------------------------
         // 7. Advanced Tab
         // -------------------------------------------------------------------------
         let adv_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
-        adv_box.set_margin_start(16);
-        adv_box.set_margin_end(16);
+        adv_box.set_margin_start(20);
+        adv_box.set_margin_end(20);
         adv_box.set_margin_top(16);
         adv_box.set_margin_bottom(16);
 
         // Section 1: Notify New Activity
         let notify_title = gtk::Label::new(None);
         notify_title.set_markup("<b>Notify New Activity</b>");
+        notify_title.add_css_class("heading");
         notify_title.set_halign(gtk::Align::Start);
         let notify_desc = gtk::Label::new(Some(
             "A notification can be raised when new activity occurs after a specified period of silence.",
@@ -1074,8 +1160,8 @@ impl TilixPreferencesWindow {
         notify_desc.set_opacity(0.7);
 
         let notify_grid = gtk::Grid::new();
-        notify_grid.set_column_spacing(12);
-        notify_grid.set_row_spacing(8);
+        notify_grid.set_column_spacing(16);
+        notify_grid.set_row_spacing(10);
 
         let silence_lbl = gtk::Label::new(Some("Enable by default"));
         silence_lbl.set_halign(gtk::Align::End);
@@ -1090,6 +1176,7 @@ impl TilixPreferencesWindow {
         let thresh_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let silence_thresh_adj = gtk::Adjustment::new(0.0, 0.0, 3600.0, 1.0, 5.0, 0.0);
         let silence_thresh_spin = gtk::SpinButton::new(Some(&silence_thresh_adj), 1.0, 0);
+        silence_thresh_spin.set_size_request(100, -1);
         thresh_box.append(&silence_thresh_spin);
         thresh_box.append(&gtk::Label::new(Some("(seconds)")));
         notify_grid.attach(&thresh_lbl, 0, 1, 1, 1);
@@ -1102,6 +1189,7 @@ impl TilixPreferencesWindow {
         // Section 2: Custom Links
         let links_title = gtk::Label::new(None);
         links_title.set_markup("<b>Custom Links</b>");
+        links_title.add_css_class("heading");
         links_title.set_halign(gtk::Align::Start);
 
         let links_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -1122,6 +1210,7 @@ impl TilixPreferencesWindow {
         // Section 3: Automatic Profile Switching
         let auto_title = gtk::Label::new(None);
         auto_title.set_markup("<b>Automatic Profile Switching</b>");
+        auto_title.add_css_class("heading");
         auto_title.set_halign(gtk::Align::Start);
         let auto_desc = gtk::Label::new(Some(
             "Profiles are automatically selected based on the values entered here. Values are entered using a hostname:directory format. Either the hostname or directory can be omitted but the colon must be present. Entries with neither hostname or directory are not permitted.",
@@ -1163,16 +1252,28 @@ impl TilixPreferencesWindow {
         adv_box.append(&auto_desc);
         adv_box.append(&auto_content_box);
 
-        let adv_scrolled = gtk::ScrolledWindow::new();
-        adv_scrolled.set_child(Some(&adv_box));
+        let adv_scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&adv_box)
+            .build();
         notebook.append_page(&adv_scrolled, Some(&gtk::Label::new(Some("Advanced"))));
 
         // Assemble Profile Page Container
-        let profile_page_container = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let profile_page_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        profile_page_container.set_vexpand(true);
+        profile_page_container.set_hexpand(true);
         profile_page_container.append(&profile_header_box);
+        let header_sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+        profile_page_container.append(&header_sep);
         profile_page_container.append(&notebook);
 
         let profile_page_group = adw::PreferencesGroup::new();
+        profile_page_group.set_vexpand(true);
+        profile_page_group.set_hexpand(true);
         profile_page_group.add(&profile_page_container);
         profiles_page.add(&profile_page_group);
         window.add(&profiles_page);
