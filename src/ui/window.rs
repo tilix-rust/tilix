@@ -12,6 +12,7 @@ use crate::model::{
     expand_title_tokens_scoped, Direction, PaneTitleStyle, Profile, SessionLayoutTemplate,
     SplitOrientation, TitleEditScope, WindowStyle,
 };
+use crate::ui::geometry::calculate_window_size_for_profile;
 use crate::ui::preferences::TilixPreferencesWindow;
 use crate::ui::session_view::{SessionAction, SessionView};
 use crate::ui::terminal_pane::TerminalPane;
@@ -111,7 +112,8 @@ pub fn detach_drag_to_new_window() -> bool {
     let Some(app) = gio::Application::default().and_then(|a| a.downcast::<adw::Application>().ok()) else {
         return false;
     };
-    let new_win = TilixWindow::new_empty(&app);
+    let profile = pane.current_profile();
+    let new_win = TilixWindow::new_empty_with_profile(&app, &profile);
     new_win.create_tab_with_existing_pane(pane);
     new_win.present();
     true
@@ -353,12 +355,22 @@ pub struct TilixWindow {
 
 impl TilixWindow {
     pub fn new_empty(app: &adw::Application) -> Self {
+        let cfg = crate::model::AppConfig::load();
+        Self::new_empty_with_profile(app, cfg.get_default_profile())
+    }
+
+    pub fn new_empty_with_profile(app: &adw::Application, profile: &Profile) -> Self {
         let window = adw::ApplicationWindow::new(app);
-        window.set_default_size(900, 600);
+        let cfg = crate::model::AppConfig::load();
+
+        let monitor = gtk::gdk::Display::default().and_then(|d| {
+            d.monitors().item(0).and_then(|o| o.downcast::<gtk::gdk::Monitor>().ok())
+        });
+        let (width, height) = calculate_window_size_for_profile(profile, &cfg, monitor.as_ref());
+        window.set_default_size(width, height);
         window.set_title(Some("Tilix"));
 
         let header_bar = adw::HeaderBar::new();
-        let cfg = crate::model::AppConfig::load();
         header_bar.set_visible(cfg.window_style != WindowStyle::HideToolbar);
         WINDOW_HEADER_BARS.with(|bars| bars.borrow_mut().push(header_bar.downgrade()));
 
@@ -466,6 +478,12 @@ impl TilixWindow {
     pub fn new(app: &adw::Application) -> Self {
         let tilix_win = Self::new_empty(app);
         // Open initial tab
+        tilix_win.create_tab();
+        tilix_win
+    }
+
+    pub fn new_with_profile(app: &adw::Application, profile: &Profile) -> Self {
+        let tilix_win = Self::new_empty_with_profile(app, profile);
         tilix_win.create_tab();
         tilix_win
     }

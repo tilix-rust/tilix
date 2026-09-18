@@ -1,7 +1,7 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.11.0 (Phase 11 Session & Application Title Options)  
+**Version:** 0.12.0 (Phase 12 Dynamic Window Geometry & Default Size Calculation)  
 **Date:** 2026-09-18  
 
 
@@ -669,5 +669,42 @@ Phase 8 elevates Tilix's tiling ergonomics to parity with modern tiling IDEs and
 - **Window dynamic title sync:** `TilixWindow` registers window updater closure in `WINDOW_TITLE_UPDATERS`. Reacts to active tab switch, session title changes, and preference changes via `apply_title_settings_to_all_windows()`.
 - Updates both the Libadwaita window title (`window.set_title`) and `adw::WindowTitle` (`title_widget.set_title` / `set_subtitle`).
 - Safe borrow checking (`try_borrow`) prevents re-entrant RefCell panics during tab/pane split and closure lifecycles.
+
+---
+
+## 24. Window Geometry & Dynamic Sizing (Phase 12)
+
+### 24.1 Character Cell Measurement (`src/ui/geometry.rs`)
+- **Headless VTE Measurement:** Character cell dimensions are accurately measured using a headless `vte::Terminal` instance configured with the profile's font (or system fallback `"Monospace 11"`) and cell scale factors (`cell_width_scale`, `cell_height_scale`).
+- **Metric Verification:** Cell dimensions are extracted via `char_width()` and `char_height()`. If font measurement fails or returns non-positive dimensions, the system falls back gracefully to `(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)` (900x600).
+
+### 24.2 Geometry Decomposition & Summation Formula
+Target window dimensions are computed from the profile's character grid and active window chrome:
+- **Terminal Grid Width:**
+  $$W_{\text{term}} = (C \times W_{\text{cell}}) + W_{\text{scrollbar}} + (2 \times \text{profile.draw\_margin})$$
+  where $C = \max(1, \text{default\_size\_columns})$, and $W_{\text{scrollbar}} = 16$ if `profile.show_scrollbar` else 0.
+- **Terminal Grid Height:**
+  $$H_{\text{term}} = (R \times H_{\text{cell}}) + H_{\text{pane\_header}}$$
+  where $R = \max(1, \text{default\_size\_rows})$, and $H_{\text{pane\_header}} = 36$ if `pane_title_style != PaneTitleStyle::None && pane_title_show_when_single` else 0.
+- **Window Chrome Summation:**
+  $$W_{\text{chrome}} = 0$$
+  $$H_{\text{chrome}} = H_{\text{header\_bar}} + H_{\text{tab\_bar}}$$
+  where $H_{\text{header\_bar}} = 46$ if `window_style != WindowStyle::HideToolbar` else 0, and $H_{\text{tab\_bar}} = 38$ if `show_tab_bar` else 0.
+- **Raw Dimensions:**
+  $$W_{\text{raw}} = W_{\text{term}} + W_{\text{chrome}}$$
+  $$H_{\text{raw}} = H_{\text{term}} + H_{\text{chrome}}$$
+
+### 24.3 Screen Boundary Clamping & Headless Fallbacks
+- **Monitor Boundary Clamping:** When a target `gdk::Monitor` is available, dimensions are clamped to a maximum ratio of 90% (`MAX_MONITOR_RATIO = 0.90`):
+  $$W_{\text{max}} = \text{round}(W_{\text{mon}} \times 0.90), \quad H_{\text{max}} = \text{round}(H_{\text{mon}} \times 0.90)$$
+  $$W_{\text{final}} = \text{clamp}(W_{\text{raw}}, \min(300, W_{\text{max}}), W_{\text{max}})$$
+  $$H_{\text{final}} = \text{clamp}(H_{\text{raw}}, \min(200, H_{\text{max}}), H_{\text{max}})$$
+- **Minimum Bounds:** Ensures the window never collapses below `MIN_WINDOW_WIDTH` (300px) by `MIN_WINDOW_HEIGHT` (200px).
+- **Headless Fallback:** In headless CI or when cell dimensions cannot be resolved, standard fallback `(900, 600)` is applied cleanly without runtime warnings or panics.
+
+### 24.4 Window Creation & Detached Tab Integration (`src/ui/window.rs`)
+- **Default Profile Sizing:** `TilixWindow::new_empty` delegates to `Self::new_empty_with_profile(app, cfg.get_default_profile())`, querying the default monitor via `gdk::Display::default()` and sizing the window accordingly.
+- **Profile-Specific Constructors:** Added `TilixWindow::new_empty_with_profile(app, profile)` and `TilixWindow::new_with_profile(app, profile)`.
+- **Detached Window Sizing:** `detach_drag_to_new_window` retrieves the detached pane's profile via `pane.current_profile()` and sizes the new window using `TilixWindow::new_empty_with_profile(&app, &profile)`.
 
 
