@@ -1,8 +1,8 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.10.0 (Phase 10 Profile Preferences UI Parity Architecture)  
-**Date:** 2026-09-17  
+**Version:** 0.11.0 (Phase 11 Session & Application Title Options)  
+**Date:** 2026-09-18  
 
 
 ---
@@ -628,4 +628,46 @@ Phase 8 elevates Tilix's tiling ergonomics to parity with modern tiling IDEs and
 
 ### 22.3 Reactive State Synchronization
 - Every widget modification immediately mutates `current_config`, writes asynchronously to disk (`save()`), triggers `on_profile_changed()` to broadcast live updates to running terminal panes via `apply_profile_to_all_sessions()`, and updates the dropdown state without refcell borrow conflicts.
+
+---
+
+## 23. Title Options & Token Subsystem (Phase 11)
+
+### 23.1 Token Engine & Expansion Model (`src/model/title.rs`)
+- **Headless Domain Expansion:** Headless pure token expansion engine isolated from GTK/display servers.
+- **TitleEditScope:** Differentiates token catalogs across contexts:
+  - `TitleEditScope::Terminal`: Supports terminal tokens (`${title}`, `${id}`, `${profile}`, `${directory}`, `${process}`, `${user}`, `${host}`, `${cols}`, `${rows}`, etc.).
+  - `TitleEditScope::Session`: Supports session tokens (`${title}`, `${sessionName}`, `${terminalCount}`, `${profile}`, `${directory}`, `${appName}`).
+  - `TitleEditScope::Window`: Supports window tokens (`${appName}`, `${sessionName}`, `${sessionNumber}`, `${sessionCount}`, `${activeTitle}`).
+  - `TitleEditScope::Badge`: Supports badge tokens (`${directory}`, `${user}`, `${host}`, `${cols}`, `${rows}`, `${sessionName}`).
+- **TokenContext:** Captures runtime state snapshot:
+  - Terminal pane info: `terminal_id`, `terminal_title`, `process_name`, `directory`, `user`, `host`, `profile_name`, `cols`, `rows`.
+  - Session info: `session_name`, `session_number`, `session_count`, `terminal_count`.
+  - Window info: `app_name`, `active_title`.
+- **Interpolation Grammar:**
+  - Token syntax: `${var}` or `${var:fallback}`. Fallback values are parsed and substituted when the variable evaluates to empty.
+  - Case-insensitive token identifiers.
+  - Safe replacement preventing recursive expansion and preserving unknown tokens.
+
+### 23.2 Configuration Extension (`src/model/config.rs`)
+- **Default Session Name:** `AppConfig.default_session_name: String`, defaulting to `"${title}"`.
+- **Application Title:** `AppConfig.app_title: String`, defaulting to `"${appName}: ${sessionName}"`.
+- Fully backwards compatible with existing config files via `#[serde(default = "...")]`.
+
+### 23.3 Scoped Token Popover Menus (`src/ui/preferences.rs`)
+- Replaces static popovers with `create_scoped_token_menu_button(target_entry, scope)`.
+- Categorized menu sections:
+  - **Terminal / Session / Window Variables:** Context-relevant token action buttons.
+  - **Help / Presets Section:** Standard default patterns.
+- Direct cursor-position insertion into `gtk::Entry` via `target_entry.insert_text(tok, &mut pos)` with focus retention.
+- Integrated into:
+  - Profile preferences: Terminal title entry (`TitleEditScope::Terminal`) and Badge entry (`TitleEditScope::Badge`).
+  - Appearance preferences: Default session name entry (`TitleEditScope::Session`) and Application title entry (`TitleEditScope::Window`).
+
+### 23.4 Reactive Dynamic Title Synchronization (`src/ui/session_view.rs`, `src/ui/window.rs`)
+- **Session dynamic title sync:** `SessionView` observes terminal pane title changes and active pane focus changes. Computes `compute_session_title()` from `AppConfig.default_session_name` and updates tab page title (unless custom overridden by user).
+- **Window dynamic title sync:** `TilixWindow` registers window updater closure in `WINDOW_TITLE_UPDATERS`. Reacts to active tab switch, session title changes, and preference changes via `apply_title_settings_to_all_windows()`.
+- Updates both the Libadwaita window title (`window.set_title`) and `adw::WindowTitle` (`title_widget.set_title` / `set_subtitle`).
+- Safe borrow checking (`try_borrow`) prevents re-entrant RefCell panics during tab/pane split and closure lifecycles.
+
 

@@ -9,7 +9,8 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::model::{
-    Direction, PaneTitleStyle, Profile, SessionLayoutTemplate, SplitOrientation, WindowStyle,
+    expand_title_tokens_scoped, Direction, PaneTitleStyle, Profile, SessionLayoutTemplate,
+    SplitOrientation, TitleEditScope, WindowStyle,
 };
 use crate::ui::preferences::TilixPreferencesWindow;
 use crate::ui::session_view::{SessionAction, SessionView};
@@ -17,12 +18,14 @@ use crate::ui::terminal_pane::TerminalPane;
 
 type SessionMap = Rc<RefCell<HashMap<adw::TabPage, Rc<RefCell<SessionView>>>>>;
 type TabReference = (glib::WeakRef<adw::TabView>, glib::WeakRef<adw::TabPage>);
+type WindowTitleUpdater = (glib::WeakRef<adw::ApplicationWindow>, Rc<dyn Fn()>);
 
 thread_local! {
     static WIDGET_TO_SESSION: RefCell<HashMap<gtk::Widget, Rc<RefCell<SessionView>>>> = RefCell::new(HashMap::new());
     static SESSION_TO_TAB: RefCell<HashMap<gtk::Widget, TabReference>> = RefCell::new(HashMap::new());
     static WINDOW_HEADER_BARS: RefCell<Vec<glib::WeakRef<adw::HeaderBar>>> = const { RefCell::new(Vec::new()) };
     static WINDOW_TAB_BARS: RefCell<Vec<glib::WeakRef<adw::TabBar>>> = const { RefCell::new(Vec::new()) };
+    static WINDOW_TITLE_UPDATERS: RefCell<Vec<WindowTitleUpdater>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn register_session_widget(widget: &gtk::Widget, session: Rc<RefCell<SessionView>>) {
@@ -164,6 +167,90 @@ pub fn apply_pane_title_settings_to_all_sessions(style: PaneTitleStyle, show_whe
     });
 }
 
+pub fn apply_title_settings_to_all_windows() {
+    WIDGET_TO_SESSION.with(|m| {
+        for session in m.borrow().values() {
+            session.borrow().notify_title_changed();
+        }
+    });
+    WINDOW_TITLE_UPDATERS.with(|updaters| {
+        updaters.borrow_mut().retain(|(win_weak, updater)| {
+            if win_weak.upgrade().is_some() {
+                updater();
+                true
+            } else {
+                false
+            }
+        });
+    });
+}
+
+fn compute_and_apply_window_title(
+    window: &adw::ApplicationWindow,
+    tab_view: &adw::TabView,
+    title_widget: &adw::WindowTitle,
+) {
+    let n_pages = tab_view.n_pages() as usize;
+
+    for i in 0..tab_view.n_pages() {
+        let page = tab_view.nth_page(i);
+        let child = page.child();
+        if let Some(session_rc) = WIDGET_TO_SESSION.with(|m| m.borrow().get(&child).cloned()) {
+            if let Ok(s) = session_rc.try_borrow() {
+                let session_title = s.active_title();
+                page.set_title(&session_title);
+            }
+        }
+    }
+
+    let (selected_session_title, selected_page_idx, session_rc_opt) =
+        if let Some(page) = tab_view.selected_page() {
+            let idx = tab_view.page_position(&page) as usize + 1;
+            let child = page.child();
+            let session = WIDGET_TO_SESSION.with(|m| m.borrow().get(&child).cloned());
+            let title = session
+                .as_ref()
+                .and_then(|s| s.try_borrow().ok().map(|s_ref| s_ref.active_title()))
+                .unwrap_or_else(|| page.title().to_string());
+            (title, idx, session)
+        } else {
+            ("Terminal".to_string(), 1, None)
+        };
+
+    let mut ctx = if let Some(session_rc) = session_rc_opt {
+        if let Ok(s) = session_rc.try_borrow() {
+            s.build_token_context()
+        } else {
+            crate::model::title::TokenContext::new_window(
+                &selected_session_title,
+                n_pages.max(1),
+                selected_page_idx,
+            )
+        }
+    } else {
+        crate::model::title::TokenContext::new_window(
+            &selected_session_title,
+            n_pages.max(1),
+            selected_page_idx,
+        )
+    };
+
+    ctx.app_name = Some("Tilix".to_string());
+    ctx.session_name = Some(selected_session_title);
+    ctx.session_number = Some(selected_page_idx);
+    ctx.session_count = Some(n_pages.max(1));
+
+    let cfg = crate::model::AppConfig::load();
+    let resolved = expand_title_tokens_scoped(
+        &cfg.app_title,
+        TitleEditScope::Window,
+        &ctx,
+    );
+
+    window.set_title(Some(&resolved));
+    title_widget.set_title(&resolved);
+}
+
 pub fn setup_css() {
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_string(
@@ -261,6 +348,7 @@ pub struct TilixWindow {
     tab_view: adw::TabView,
     sessions: SessionMap,
     next_session_id: Rc<RefCell<u64>>,
+    title_widget: adw::WindowTitle,
 }
 
 impl TilixWindow {
@@ -298,15 +386,22 @@ impl TilixWindow {
         let sync_btn = gtk::ToggleButton::new();
         sync_btn.set_icon_name("network-transmit-receive-symbolic");
         sync_btn.set_tooltip_text(Some("Toggle Synchronized Input (Ctrl+Shift+I)"));
-        sync_btn.add_css_class("flat");
         sync_btn.set_action_name(Some("win.toggle-sync-input"));
+        sync_btn.add_css_class("flat");
         header_bar.pack_start(&sync_btn);
 
-        let close_btn = gtk::Button::from_icon_name("window-close-symbolic");
-        close_btn.set_tooltip_text(Some("Close Pane or Tab (Ctrl+Shift+W)"));
-        close_btn.set_action_name(Some("win.close-pane"));
-        close_btn.add_css_class("flat");
-        header_bar.pack_end(&close_btn);
+        let menu_btn = gtk::MenuButton::new();
+        menu_btn.set_icon_name("open-menu-symbolic");
+        menu_btn.set_tooltip_text(Some("Main Menu"));
+        menu_btn.set_primary(true);
+        header_bar.pack_end(&menu_btn);
+
+        let app_menu = gio::Menu::new();
+        app_menu.append(Some("Preferences"), Some("win.preferences"));
+        app_menu.append(Some("Save Layout..."), Some("win.save-layout"));
+        app_menu.append(Some("Shortcuts"), Some("win.shortcuts"));
+        app_menu.append(Some("About Tilix"), Some("win.about"));
+        menu_btn.set_menu_model(Some(&app_menu));
 
         let tab_view = adw::TabView::new();
         let tab_bar = adw::TabBar::new();
@@ -314,6 +409,35 @@ impl TilixWindow {
         tab_bar.set_autohide(false);
         tab_bar.set_visible(cfg.show_tab_bar);
         WINDOW_TAB_BARS.with(|bars| bars.borrow_mut().push(tab_bar.downgrade()));
+
+        let win_weak = window.downgrade();
+        let tv_weak = tab_view.downgrade();
+        let tw_weak = title_widget.downgrade();
+
+        let update_titles: Rc<dyn Fn()> = Rc::new(move || {
+            if let (Some(w), Some(tv), Some(tw)) = (win_weak.upgrade(), tv_weak.upgrade(), tw_weak.upgrade()) {
+                compute_and_apply_window_title(&w, &tv, &tw);
+            }
+        });
+
+        WINDOW_TITLE_UPDATERS.with(|updaters| {
+            updaters.borrow_mut().push((window.downgrade(), Rc::clone(&update_titles)));
+        });
+
+        let u_sel = Rc::clone(&update_titles);
+        tab_view.connect_selected_page_notify(move |_| {
+            u_sel();
+        });
+
+        let u_att = Rc::clone(&update_titles);
+        tab_view.connect_page_attached(move |_, _, _| {
+            u_att();
+        });
+
+        let u_det = Rc::clone(&update_titles);
+        tab_view.connect_page_detached(move |_, _, _| {
+            u_det();
+        });
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header_bar);
@@ -329,6 +453,7 @@ impl TilixWindow {
             tab_view,
             sessions,
             next_session_id,
+            title_widget,
         };
 
         tilix_win.setup_tab_close_handler();
@@ -413,6 +538,11 @@ impl TilixWindow {
             if let Some(page) = page_weak.upgrade() {
                 page.set_title(title);
             }
+            WINDOW_TITLE_UPDATERS.with(|updaters| {
+                for (_, u) in updaters.borrow().iter() {
+                    u();
+                }
+            });
         });
 
         // Wire session view action handler
@@ -427,11 +557,11 @@ impl TilixWindow {
                 let Some(session) = s_weak.upgrade() else { return; };
                 match action {
                     SessionAction::Split(id, orientation) => {
-                        session.borrow_mut().set_active_pane(id);
-                        session.borrow_mut().split_active(orientation);
+                        session.borrow().set_active_pane(id);
+                        session.borrow().split_active(orientation);
                     }
                     SessionAction::Close(id) => {
-                        session.borrow_mut().close_pane(id);
+                        session.borrow().close_pane(id);
                         if session.borrow().is_empty() {
                             if let (Some(tv), Some(p)) = (tv_weak.upgrade(), p_weak.upgrade()) {
                                 tv.close_page(&p);
@@ -439,7 +569,7 @@ impl TilixWindow {
                         }
                     }
                     SessionAction::Focus(id) => {
-                        session.borrow_mut().set_active_pane(id);
+                        session.borrow().set_active_pane(id);
                     }
                 }
             });
@@ -450,6 +580,12 @@ impl TilixWindow {
             .insert(tab_page.clone(), Rc::clone(&session_view));
         tab_view.set_selected_page(&tab_page);
         session_view.borrow().grab_focus();
+
+        WINDOW_TITLE_UPDATERS.with(|updaters| {
+            for (_, u) in updaters.borrow().iter() {
+                u();
+            }
+        });
 
         (tab_page, session_view)
     }
@@ -556,6 +692,11 @@ impl TilixWindow {
             if let Some(page) = page_weak.upgrade() {
                 page.set_title(title);
             }
+            WINDOW_TITLE_UPDATERS.with(|updaters| {
+                for (_, u) in updaters.borrow().iter() {
+                    u();
+                }
+            });
         });
 
         // Wire session view action handler
@@ -570,11 +711,11 @@ impl TilixWindow {
                 let Some(session) = s_weak.upgrade() else { return; };
                 match action {
                     SessionAction::Split(id, orientation) => {
-                        session.borrow_mut().set_active_pane(id);
-                        session.borrow_mut().split_active(orientation);
+                        session.borrow().set_active_pane(id);
+                        session.borrow().split_active(orientation);
                     }
                     SessionAction::Close(id) => {
-                        session.borrow_mut().close_pane(id);
+                        session.borrow().close_pane(id);
                         if session.borrow().is_empty() {
                             if let (Some(tv), Some(p)) = (tv_weak.upgrade(), p_weak.upgrade()) {
                                 tv.close_page(&p);
@@ -582,7 +723,7 @@ impl TilixWindow {
                         }
                     }
                     SessionAction::Focus(id) => {
-                        session.borrow_mut().set_active_pane(id);
+                        session.borrow().set_active_pane(id);
                     }
                 }
             });
@@ -590,6 +731,12 @@ impl TilixWindow {
 
         self.tab_view.set_selected_page(&tab_page);
         session_view.borrow().grab_focus();
+
+        WINDOW_TITLE_UPDATERS.with(|updaters| {
+            for (_, u) in updaters.borrow().iter() {
+                u();
+            }
+        });
 
         (tab_page, session_view)
     }
@@ -757,7 +904,7 @@ impl TilixWindow {
                 let Some(page) = tv.selected_page() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
-                    session.borrow_mut().split_active(SplitOrientation::Horizontal);
+                    session.borrow().split_active(SplitOrientation::Horizontal);
                 }
             });
             self.window.add_action(&action);
@@ -773,7 +920,7 @@ impl TilixWindow {
                 let Some(page) = tv.selected_page() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
-                    session.borrow_mut().split_active(SplitOrientation::Vertical);
+                    session.borrow().split_active(SplitOrientation::Vertical);
                 }
             });
             self.window.add_action(&action);
@@ -789,7 +936,7 @@ impl TilixWindow {
                 let Some(page) = tv.selected_page() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
-                    session.borrow_mut().balance_layout();
+                    session.borrow().balance_layout();
                 }
             });
             self.window.add_action(&action);
@@ -814,7 +961,7 @@ impl TilixWindow {
                 let Some(page) = tv.selected_page() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
-                    session.borrow_mut().set_sync_input_enabled(new_state);
+                    session.borrow().set_sync_input_enabled(new_state);
                 }
             });
             self.window.add_action(&action);
@@ -905,7 +1052,7 @@ impl TilixWindow {
                 let Some(page) = tv.selected_page() else { return; };
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
-                    session.borrow_mut().focus_adjacent(dir);
+                    session.borrow().focus_adjacent(dir);
                 }
             });
             self.window.add_action(&action);
@@ -930,6 +1077,14 @@ impl TilixWindow {
 
     pub fn tab_view(&self) -> &adw::TabView {
         &self.tab_view
+    }
+
+    pub fn title_widget(&self) -> &adw::WindowTitle {
+        &self.title_widget
+    }
+
+    pub fn update_window_and_tab_titles(&self) {
+        compute_and_apply_window_title(&self.window, &self.tab_view, &self.title_widget);
     }
 
     pub fn session_view(&self) -> Option<Rc<RefCell<SessionView>>> {

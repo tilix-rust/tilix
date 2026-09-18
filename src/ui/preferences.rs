@@ -13,6 +13,9 @@ use crate::model::profile::{
     TerminalBellPreference, TextBlinkModePreference,
 };
 use crate::model::theme::{ColorScheme, RgbColor};
+use crate::model::title::{
+    TitleEditScope, SESSION_TOKEN_DEFS, TERMINAL_TOKEN_DEFS, WINDOW_TOKEN_DEFS,
+};
 
 fn rgb_to_rgba(c: &RgbColor) -> gtk::gdk::RGBA {
     gtk::gdk::RGBA::builder()
@@ -32,7 +35,10 @@ fn rgba_to_rgb(rgba: &gtk::gdk::RGBA) -> RgbColor {
     )
 }
 
-fn create_token_menu_button(target_entry: &gtk::Entry) -> gtk::MenuButton {
+pub fn create_scoped_token_menu_button(
+    target_entry: &gtk::Entry,
+    scope: TitleEditScope,
+) -> gtk::MenuButton {
     let menu_btn = gtk::MenuButton::new();
     menu_btn.set_icon_name("pan-down-symbolic");
 
@@ -43,33 +49,94 @@ fn create_token_menu_button(target_entry: &gtk::Entry) -> gtk::MenuButton {
     vbox.set_margin_start(6);
     vbox.set_margin_end(6);
 
-    let tokens = [
-        "${id}: ${title}",
-        "${title}",
-        "${profile}",
-        "${directory}",
-        "${appName}",
-    ];
+    let add_header = |v: &gtk::Box, title: &str| {
+        let lbl = gtk::Label::new(Some(title));
+        lbl.add_css_class("heading");
+        lbl.set_halign(gtk::Align::Start);
+        lbl.set_margin_top(4);
+        lbl.set_margin_bottom(2);
+        v.append(&lbl);
+    };
 
-    for tok in tokens {
+    let add_button = |v: &gtk::Box, tok: &'static str, desc: &'static str| {
         let b = gtk::Button::with_label(tok);
         b.add_css_class("flat");
         b.set_halign(gtk::Align::Start);
+        b.set_tooltip_text(Some(desc));
         let entry_clone = target_entry.clone();
         let pop_weak = popover.downgrade();
-        let tok_str = tok.to_string();
         b.connect_clicked(move |_| {
-            entry_clone.set_text(&tok_str);
+            let mut pos = entry_clone.position();
+            entry_clone.insert_text(tok, &mut pos);
+            entry_clone.set_position(pos);
             if let Some(p) = pop_weak.upgrade() {
                 p.popdown();
             }
+            entry_clone.grab_focus();
         });
-        vbox.append(&b);
+        v.append(&b);
+    };
+
+    // 1. Terminal section (always visible)
+    add_header(&vbox, "Terminal");
+    for def in TERMINAL_TOKEN_DEFS {
+        add_button(&vbox, def.token, def.description);
     }
 
-    popover.set_child(Some(&vbox));
+    // 2. Session section (visible for Session and Window scopes)
+    if scope == TitleEditScope::Session || scope == TitleEditScope::Window {
+        let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+        vbox.append(&sep);
+        add_header(&vbox, "Session");
+        for def in SESSION_TOKEN_DEFS {
+            add_button(&vbox, def.token, def.description);
+        }
+    }
+
+    // 3. Window section (visible for Window scope)
+    if scope == TitleEditScope::Window {
+        let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+        vbox.append(&sep);
+        add_header(&vbox, "Window");
+        for def in WINDOW_TOKEN_DEFS {
+            add_button(&vbox, def.token, def.description);
+        }
+    }
+
+    // 4. Help section
+    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+    vbox.append(&sep);
+    let help_btn = gtk::Button::with_label("Online Help...");
+    help_btn.add_css_class("flat");
+    help_btn.set_halign(gtk::Align::Start);
+    help_btn.set_icon_name("help-browser-symbolic");
+    let pop_weak_help = popover.downgrade();
+    help_btn.connect_clicked(move |_| {
+        let _ = gio::AppInfo::launch_default_for_uri(
+            "https://gnunn1.github.io/tilix-web/manual/title/",
+            None::<&gio::AppLaunchContext>,
+        );
+        if let Some(p) = pop_weak_help.upgrade() {
+            p.popdown();
+        }
+    });
+    vbox.append(&help_btn);
+
+    let scrolled = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .max_content_height(350)
+        .propagate_natural_height(true)
+        .child(&vbox)
+        .build();
+
+    popover.set_child(Some(&scrolled));
     menu_btn.set_popover(Some(&popover));
     menu_btn
+}
+
+pub fn create_token_menu_button(target_entry: &gtk::Entry) -> gtk::MenuButton {
+    create_scoped_token_menu_button(target_entry, TitleEditScope::Terminal)
 }
 
 fn create_color_button() -> gtk::ColorDialogButton {
@@ -490,7 +557,7 @@ impl TilixPreferencesWindow {
         let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let title_entry = gtk::Entry::new();
         title_entry.set_hexpand(true);
-        let title_token_btn = create_token_menu_button(&title_entry);
+        let title_token_btn = create_scoped_token_menu_button(&title_entry, TitleEditScope::Terminal);
         title_box.append(&title_entry);
         title_box.append(&title_token_btn);
         gen_grid.attach(&title_lbl, 0, 1, 1, 1);
@@ -958,7 +1025,7 @@ impl TilixPreferencesWindow {
         let badge_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let badge_entry = gtk::Entry::new();
         badge_entry.set_hexpand(true);
-        let badge_token_btn = create_token_menu_button(&badge_entry);
+        let badge_token_btn = create_scoped_token_menu_button(&badge_entry, TitleEditScope::Terminal);
         badge_box.append(&badge_entry);
         badge_box.append(&badge_token_btn);
         badge_grid.attach(&badge_lbl, 0, 0, 1, 1);
@@ -2174,6 +2241,40 @@ impl TilixPreferencesWindow {
         title_show_single_row.set_active(current_config.borrow().pane_title_show_when_single);
         title_group.add(&title_show_single_row);
 
+        let session_name_row = adw::ActionRow::new();
+        session_name_row.set_title("Default session name");
+        session_name_row.set_subtitle("Title template used for session tabs");
+
+        let session_name_entry = gtk::Entry::new();
+        session_name_entry.set_text(&current_config.borrow().default_session_name);
+        session_name_entry.set_valign(gtk::Align::Center);
+        session_name_entry.set_hexpand(true);
+
+        let session_token_btn = create_scoped_token_menu_button(&session_name_entry, TitleEditScope::Session);
+        session_token_btn.set_valign(gtk::Align::Center);
+
+        session_name_row.add_suffix(&session_name_entry);
+        session_name_row.add_suffix(&session_token_btn);
+        session_name_row.set_activatable_widget(Some(&session_name_entry));
+        title_group.add(&session_name_row);
+
+        let app_title_row = adw::ActionRow::new();
+        app_title_row.set_title("Application title");
+        app_title_row.set_subtitle("Title template used for the main window header");
+
+        let app_title_entry = gtk::Entry::new();
+        app_title_entry.set_text(&current_config.borrow().app_title);
+        app_title_entry.set_valign(gtk::Align::Center);
+        app_title_entry.set_hexpand(true);
+
+        let app_token_btn = create_scoped_token_menu_button(&app_title_entry, TitleEditScope::Window);
+        app_token_btn.set_valign(gtk::Align::Center);
+
+        app_title_row.add_suffix(&app_title_entry);
+        app_title_row.add_suffix(&app_token_btn);
+        app_title_row.set_activatable_widget(Some(&app_title_entry));
+        title_group.add(&app_title_row);
+
         appearance_page.add(&title_group);
         window.add(&appearance_page);
 
@@ -2226,6 +2327,27 @@ impl TilixPreferencesWindow {
             title_style_row.connect_selected_notify(move |_| s4());
             let s5 = Rc::clone(&save_app);
             title_show_single_row.connect_active_notify(move |_| s5());
+
+            let config_rc_titles = Rc::clone(&current_config);
+            let s_entry = session_name_entry.clone();
+            let a_entry = app_title_entry.clone();
+            let save_titles = Rc::new(move || {
+                let default_session_name = s_entry.text().to_string();
+                let app_title = a_entry.text().to_string();
+
+                let mut cfg = config_rc_titles.borrow_mut();
+                cfg.default_session_name = default_session_name;
+                cfg.app_title = app_title;
+
+                let _ = cfg.save();
+                drop(cfg);
+                crate::ui::window::apply_title_settings_to_all_windows();
+            });
+
+            let st1 = Rc::clone(&save_titles);
+            session_name_entry.connect_changed(move |_| st1());
+            let st2 = Rc::clone(&save_titles);
+            app_title_entry.connect_changed(move |_| st2());
         }
 
         // =========================================================================

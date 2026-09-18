@@ -49,6 +49,7 @@ pub struct TerminalPane {
     close_btn: gtk::Button,
     terminal: vte::Terminal,
     pane_id: PaneId,
+    child_pid: Rc<Cell<Option<i32>>>,
     current_directory: Rc<RefCell<Option<PathBuf>>>,
     current_profile: Rc<RefCell<Profile>>,
     is_sync_enabled: Rc<Cell<bool>>,
@@ -170,6 +171,7 @@ impl TerminalPane {
             title_label: title_label.clone(),
         };
 
+        let child_pid: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
         let current_directory = Rc::new(RefCell::new(initial_directory.map(|p| p.to_path_buf())));
         let current_profile = Rc::new(RefCell::new(Profile::default()));
         let is_sync_enabled = Rc::new(Cell::new(true));
@@ -200,8 +202,13 @@ impl TerminalPane {
 
         // Wire close button
         {
+            let is_closing = Rc::clone(&is_closing);
             let callbacks = Rc::clone(&close_callbacks);
             close_btn.connect_clicked(move |_| {
+                if is_closing.get() {
+                    return;
+                }
+                is_closing.set(true);
                 if let Ok(list) = callbacks.try_borrow() {
                     for cb in list.iter() {
                         cb(pane_id);
@@ -210,7 +217,7 @@ impl TerminalPane {
             });
         }
 
-        // Wire split buttons
+        // Wire split horizontal button
         {
             let callbacks = Rc::clone(&split_callbacks);
             split_h_btn.connect_clicked(move |_| {
@@ -221,6 +228,8 @@ impl TerminalPane {
                 }
             });
         }
+
+        // Wire split vertical button
         {
             let callbacks = Rc::clone(&split_callbacks);
             split_v_btn.connect_clicked(move |_| {
@@ -240,8 +249,10 @@ impl TerminalPane {
             let profile_rc = Rc::clone(&current_profile);
             let title_lbl = title_label.clone();
             let current_dir = Rc::clone(&current_directory);
+            let pid_cell = Rc::clone(&child_pid);
 
             terminal.connect_child_exited(move |term, status| {
+                pid_cell.set(None);
                 if is_closing.get() {
                     return;
                 }
@@ -262,7 +273,7 @@ impl TerminalPane {
                     }
                     ExitActionPreference::Restart => {
                         let dir = current_dir.borrow().clone();
-                        Self::spawn_shell_process(term, &profile_rc.borrow(), dir.as_deref());
+                        Self::spawn_shell_process(term, &profile_rc.borrow(), dir.as_deref(), &pid_cell);
                     }
                     ExitActionPreference::Hold => {
                         let curr_title = title_lbl.text();
@@ -293,6 +304,7 @@ impl TerminalPane {
             let cwd_clone = Rc::clone(&current_directory);
             let prof_rc = Rc::clone(&current_profile);
             let widgets = pane_widgets.clone();
+            let callbacks = Rc::clone(&title_callbacks);
             terminal.connect_current_directory_uri_changed(move |term| {
                 if let Some(uri) = term.current_directory_uri() {
                     if let Some(path) = parse_osc7_uri(&uri) {
@@ -305,6 +317,12 @@ impl TerminalPane {
                             pane_id,
                             &widgets,
                         );
+                        if let Ok(list) = callbacks.try_borrow() {
+                            let title = term.window_title().map(|s| s.to_string()).unwrap_or_else(|| "Terminal".to_string());
+                            for cb in list.iter() {
+                                cb(pane_id, &title);
+                            }
+                        }
                     }
                 }
             });
@@ -363,7 +381,7 @@ impl TerminalPane {
         }
 
         // Spawn initial shell process asynchronously
-        Self::spawn_shell_process(&terminal, &current_profile.borrow(), initial_directory);
+        Self::spawn_shell_process(&terminal, &current_profile.borrow(), initial_directory, &child_pid);
 
         Self {
             overlay,
@@ -380,6 +398,7 @@ impl TerminalPane {
             close_btn,
             terminal,
             pane_id,
+            child_pid,
             current_directory,
             current_profile,
             is_sync_enabled,
@@ -398,7 +417,12 @@ impl TerminalPane {
         }
     }
 
-    fn spawn_shell_process(terminal: &vte::Terminal, profile: &Profile, directory: Option<&Path>) {
+    fn spawn_shell_process(
+        terminal: &vte::Terminal,
+        profile: &Profile,
+        directory: Option<&Path>,
+        child_pid: &Rc<Cell<Option<i32>>>,
+    ) {
         let shell = detect_shell();
         let env_vars = default_env();
         let env_refs: Vec<&str> = env_vars.iter().map(|s| s.as_str()).collect();
@@ -406,6 +430,7 @@ impl TerminalPane {
         let (_cmd, argv) = crate::pty::shell::build_spawn_args(profile, &shell);
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
 
+        let pid_cell = Rc::clone(child_pid);
         terminal.spawn_async(
             vte::PtyFlags::DEFAULT,
             init_dir_str,
@@ -415,9 +440,14 @@ impl TerminalPane {
             || {},
             -1,
             gio::Cancellable::NONE,
-            |res| {
-                if let Err(e) = res {
-                    glib::g_warning!("Tilix", "Failed to spawn shell: {}", e);
+            move |res| {
+                match res {
+                    Ok(pid) => {
+                        pid_cell.set(Some(pid.0));
+                    }
+                    Err(e) => {
+                        glib::g_warning!("Tilix", "Failed to spawn shell: {}", e);
+                    }
                 }
             },
         );
@@ -841,7 +871,24 @@ impl TerminalPane {
     }
 
     pub fn current_directory(&self) -> Option<PathBuf> {
-        self.current_directory.borrow().clone()
+        if let Some(dir) = self.current_directory.borrow().clone() {
+            return Some(dir);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = self.child_pid.get() {
+            if let Ok(target) = std::fs::read_link(format!("/proc/{}/cwd", pid)) {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    pub fn set_current_directory(&self, dir: Option<PathBuf>) {
+        *self.current_directory.borrow_mut() = dir;
+    }
+
+    pub fn child_pid(&self) -> Option<i32> {
+        self.child_pid.get()
     }
 
     pub fn connect_bell<F: Fn(PaneId) + 'static>(&self, f: F) {

@@ -29,6 +29,14 @@ pub enum ProfileError {
     DuplicateProfileId(String),
 }
 
+pub fn default_session_name_default() -> String {
+    "${title}".to_string()
+}
+
+pub fn default_app_title_default() -> String {
+    "${appName}: ${sessionName}".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -46,6 +54,10 @@ pub struct AppConfig {
     pub pane_title_show_when_single: bool,
     pub show_tab_bar: bool,
     pub keybindings: KeybindingsConfig,
+    #[serde(default = "default_session_name_default")]
+    pub default_session_name: String,
+    #[serde(default = "default_app_title_default")]
+    pub app_title: String,
 }
 
 impl Default for AppConfig {
@@ -68,6 +80,8 @@ impl Default for AppConfig {
             pane_title_show_when_single: true,
             show_tab_bar: true,
             keybindings: KeybindingsConfig::default(),
+            default_session_name: default_session_name_default(),
+            app_title: default_app_title_default(),
         }
     }
 }
@@ -609,6 +623,27 @@ mod tests {
         assert_eq!(config.default_profile_id, "default");
         assert_eq!(config.default_profile.id, "default");
         assert!(!config.notifications_enabled);
+    }
+
+    #[test]
+    fn test_app_config_title_options_serialization_and_legacy() {
+        let mut config = AppConfig::default();
+        assert_eq!(config.default_session_name, "${title}");
+        assert_eq!(config.app_title, "${appName}: ${sessionName}");
+
+        config.default_session_name = "Session: ${activeTerminalTitle}".to_string();
+        config.app_title = "${appName} [${sessionNumber}/${sessionCount}]".to_string();
+
+        let json = config.to_json().expect("serialize to json");
+        let loaded = AppConfig::from_json(&json).expect("deserialize from json");
+        assert_eq!(loaded.default_session_name, "Session: ${activeTerminalTitle}");
+        assert_eq!(loaded.app_title, "${appName} [${sessionNumber}/${sessionCount}]");
+
+        // Legacy json missing title fields defaults properly
+        let legacy_json = r#"{"notifications_enabled": true}"#;
+        let legacy = AppConfig::from_json(legacy_json).expect("deserialize legacy json");
+        assert_eq!(legacy.default_session_name, "${title}");
+        assert_eq!(legacy.app_title, "${appName}: ${sessionName}");
     }
 }
 

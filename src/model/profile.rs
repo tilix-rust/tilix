@@ -153,23 +153,18 @@ pub struct TitleTokenContext<'a> {
 }
 
 pub fn expand_tokens(format_str: &str, ctx: &TitleTokenContext) -> String {
-    let app_name = if !ctx.app_name.is_empty() {
-        ctx.app_name
-    } else {
-        "Tilix"
-    };
-    let dir_str = ctx
-        .directory
-        .map(|d| d.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let id_str = ctx.id.to_string();
-
-    format_str
-        .replace("${id}", &id_str)
-        .replace("${title}", ctx.title)
-        .replace("${profile}", ctx.profile_name)
-        .replace("${directory}", &dir_str)
-        .replace("${appName}", app_name)
+    let mut token_ctx = crate::model::title::TokenContext::new_terminal(ctx.title);
+    token_ctx.id = Some(ctx.id);
+    token_ctx.profile_name = Some(ctx.profile_name.to_string());
+    token_ctx.directory = ctx.directory.map(|d| d.to_path_buf());
+    if !ctx.app_name.is_empty() {
+        token_ctx.app_name = Some(ctx.app_name.to_string());
+    }
+    crate::model::title::expand_title_tokens_scoped(
+        format_str,
+        crate::model::title::TitleEditScope::Terminal,
+        &token_ctx,
+    )
 }
 
 pub fn expand_title_format(format_str: &str, ctx: &TitleTokenContext) -> String {

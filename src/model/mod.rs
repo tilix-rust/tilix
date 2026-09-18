@@ -5,6 +5,7 @@ pub mod profile;
 pub mod session;
 pub mod template;
 pub mod theme;
+pub mod title;
 
 pub use config::{AppConfig, PaneTitleStyle, ProfileError, WindowStyle};
 pub use keybindings::{
@@ -24,4 +25,8 @@ pub use profile::{
 pub use session::{SessionModel, SyncGroupId};
 pub use template::SessionLayoutTemplate;
 pub use theme::{ColorScheme, RgbColor, ThemeError};
+pub use title::{
+    expand_title_tokens, expand_title_tokens_scoped, TitleEditScope, TokenContext, TokenDef,
+    SESSION_TOKEN_DEFS, TERMINAL_TOKEN_DEFS, WINDOW_TOKEN_DEFS,
+};
 

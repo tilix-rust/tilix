@@ -3,15 +3,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::model::{
-    AppConfig, ColorScheme, Direction, DockPosition, LayoutNode, LayoutTree, PaneId,
-    PaneTitleStyle, Profile, SessionModel, SplitOrientation,
+    expand_title_tokens_scoped, AppConfig, ColorScheme, Direction, DockPosition, LayoutNode,
+    LayoutTree, PaneId, PaneTitleStyle, Profile, SessionModel, SplitOrientation, TitleEditScope,
+    TokenContext,
 };
 use crate::ui::terminal_pane::TerminalPane;
+use vte4::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum SessionAction {
@@ -243,16 +244,20 @@ impl SessionView {
         let title_cb_focus = Rc::clone(title_changed_callback);
         let handler_focus = Rc::clone(action_handler);
         pane.connect_focus(move |p_id| {
+            let mut changed = false;
             if let Ok(panes) = panes_focus.try_borrow() {
                 if panes.contains_key(&p_id) {
                     if let Ok(mut m) = model_focus.try_borrow_mut() {
-                        m.set_active_pane(p_id);
+                        if m.active_pane != Some(p_id) {
+                            m.set_active_pane(p_id);
+                            changed = true;
+                        }
                     }
                     for (id, p) in panes.iter() {
                         p.set_active(*id == p_id);
                     }
-                    if let Some(p) = panes.get(&p_id) {
-                        let title = p.title();
+                    if let Ok(m) = model_focus.try_borrow() {
+                        let title = Self::compute_session_title_internal_from_refs(&m, &panes);
                         if let Ok(cb_ref) = title_cb_focus.try_borrow() {
                             if let Some(ref cb) = *cb_ref {
                                 cb(&title);
@@ -261,9 +266,11 @@ impl SessionView {
                     }
                 }
             }
-            if let Ok(h) = handler_focus.try_borrow() {
-                if let Some(cb) = h.as_ref() {
-                    cb(SessionAction::Focus(p_id));
+            if changed {
+                if let Ok(h) = handler_focus.try_borrow() {
+                    if let Some(cb) = h.as_ref() {
+                        cb(SessionAction::Focus(p_id));
+                    }
                 }
             }
         });
@@ -303,13 +310,17 @@ impl SessionView {
 
         // Title update callback
         let model_title = Rc::clone(model);
+        let panes_title = panes.clone();
         let title_cb = Rc::clone(title_changed_callback);
-        pane.connect_title_changed(move |p_id, title| {
+        pane.connect_title_changed(move |p_id, _title| {
             if let Ok(model) = model_title.try_borrow() {
                 if model.active_pane == Some(p_id) {
-                    if let Ok(cb_ref) = title_cb.try_borrow() {
-                        if let Some(ref cb) = *cb_ref {
-                            cb(title);
+                    if let Ok(panes) = panes_title.try_borrow() {
+                        let title = Self::compute_session_title_internal_from_refs(&model, &panes);
+                        if let Ok(cb_ref) = title_cb.try_borrow() {
+                            if let Some(ref cb) = *cb_ref {
+                                cb(&title);
+                            }
                         }
                     }
                 }
@@ -478,14 +489,116 @@ impl SessionView {
         self.model.borrow_mut().toggle_sync_input()
     }
 
-    pub fn active_title(&self) -> String {
-        let active_id = self.model.borrow().active_pane;
+    pub fn build_token_context(&self) -> TokenContext {
+        let model = self.model.borrow();
+        let panes = self.panes.borrow();
+        let terminal_count = panes.len();
+
+        let mut pane_ids: Vec<PaneId> = panes.keys().copied().collect();
+        pane_ids.sort();
+
+        let active_id = model.active_pane;
+        let terminal_number = active_id
+            .and_then(|id| pane_ids.iter().position(|&p| p == id).map(|idx| idx + 1))
+            .unwrap_or(1);
+
         if let Some(id) = active_id {
-            if let Some(pane) = self.panes.borrow().get(&id) {
-                return pane.title();
+            if let Some(pane) = panes.get(&id) {
+                let p_title = pane.title();
+                let cols = pane.terminal().column_count();
+                let rows = pane.terminal().row_count();
+                return TokenContext {
+                    title: p_title.clone(),
+                    icon_title: Some(p_title.clone()),
+                    id: Some(pane.pane_id().0),
+                    directory: pane.current_directory(),
+                    hostname: None,
+                    username: None,
+                    columns: if cols > 0 { Some(cols as u32) } else { None },
+                    rows: if rows > 0 { Some(rows as u32) } else { None },
+                    process: None,
+                    readonly: false,
+                    silence: false,
+                    input_sync: pane.is_sync_enabled(),
+                    profile_name: Some(pane.current_profile().name),
+                    active_terminal_title: Some(p_title),
+                    terminal_count: Some(terminal_count.max(1)),
+                    terminal_number: Some(terminal_number),
+                    ..Default::default()
+                };
             }
         }
-        "Terminal".to_string()
+
+        TokenContext::new_session("Terminal", terminal_count.max(1), terminal_number)
+    }
+
+    fn compute_session_title_internal_from_refs(
+        model: &SessionModel,
+        panes: &HashMap<PaneId, TerminalPane>,
+    ) -> String {
+        let terminal_count = panes.len();
+        let mut pane_ids: Vec<PaneId> = panes.keys().copied().collect();
+        pane_ids.sort();
+
+        let active_id = model.active_pane;
+        let terminal_number = active_id
+            .and_then(|id| pane_ids.iter().position(|&p| p == id).map(|idx| idx + 1))
+            .unwrap_or(1);
+
+        let ctx = if let Some(id) = active_id {
+            if let Some(pane) = panes.get(&id) {
+                let p_title = pane.title();
+                let cols = pane.terminal().column_count();
+                let rows = pane.terminal().row_count();
+                TokenContext {
+                    title: p_title.clone(),
+                    icon_title: Some(p_title.clone()),
+                    id: Some(pane.pane_id().0),
+                    directory: pane.current_directory(),
+                    hostname: None,
+                    username: None,
+                    columns: if cols > 0 { Some(cols as u32) } else { None },
+                    rows: if rows > 0 { Some(rows as u32) } else { None },
+                    process: None,
+                    readonly: false,
+                    silence: false,
+                    input_sync: pane.is_sync_enabled(),
+                    profile_name: Some(pane.current_profile().name),
+                    active_terminal_title: Some(p_title),
+                    terminal_count: Some(terminal_count.max(1)),
+                    terminal_number: Some(terminal_number),
+                    ..Default::default()
+                }
+            } else {
+                TokenContext::new_session("Terminal", terminal_count.max(1), terminal_number)
+            }
+        } else {
+            TokenContext::new_session("Terminal", terminal_count.max(1), terminal_number)
+        };
+
+        let cfg = AppConfig::load();
+        expand_title_tokens_scoped(
+            &cfg.default_session_name,
+            TitleEditScope::Session,
+            &ctx,
+        )
+    }
+
+    pub fn compute_session_title(&self) -> String {
+        Self::compute_session_title_internal_from_refs(&self.model.borrow(), &self.panes.borrow())
+    }
+
+    pub fn active_title(&self) -> String {
+        self.compute_session_title()
+    }
+
+    pub fn notify_title_changed(&self) {
+        let title = self.compute_session_title();
+        if let Ok(cb_ref) = self.title_changed_callback.try_borrow() {
+            if let Some(ref cb) = *cb_ref {
+                cb(&title);
+            }
+        }
     }
 
     pub fn set_active_pane(&self, id: PaneId) {
@@ -496,12 +609,12 @@ impl SessionView {
                 pane.set_active(*pane_id == id);
             }
             if let Some(pane) = panes.get(&id) {
-                pane.grab_focus();
-                let title = pane.title();
-                if let Some(ref cb) = *self.title_changed_callback.borrow() {
-                    cb(&title);
+                if !pane.terminal().has_focus() {
+                    pane.grab_focus();
                 }
             }
+            drop(panes);
+            self.notify_title_changed();
         }
     }
 
