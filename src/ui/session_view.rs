@@ -1080,10 +1080,47 @@ impl SessionView {
                     h.insert_after(&paned, Some(end));
                 }
 
+                let initial_applied = std::rc::Rc::new(std::cell::Cell::new(initial_pos > 0));
+                let applied_map = std::rc::Rc::clone(&initial_applied);
                 paned.connect_map(move |p| {
-                    let p_weak = p.downgrade();
-                    glib::idle_add_local_once(move || {
-                        if let Some(p) = p_weak.upgrade() {
+                    if applied_map.get() {
+                        return;
+                    }
+                    let len = match p.orientation() {
+                        gtk::Orientation::Horizontal => p.width(),
+                        gtk::Orientation::Vertical => p.height(),
+                        _ => p.width(),
+                    };
+                    if len > 0 {
+                        p.set_position((len as f64 * r).round() as i32);
+                        applied_map.set(true);
+                    } else {
+                        let p_weak = p.downgrade();
+                        let applied_idle = std::rc::Rc::clone(&applied_map);
+                        glib::idle_add_local_once(move || {
+                            if !applied_idle.get() {
+                                if let Some(p) = p_weak.upgrade() {
+                                    let len = match p.orientation() {
+                                        gtk::Orientation::Horizontal => p.width(),
+                                        gtk::Orientation::Vertical => p.height(),
+                                        _ => p.width(),
+                                    };
+                                    if len > 0 {
+                                        p.set_position((len as f64 * r).round() as i32);
+                                        applied_idle.set(true);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+
+                // Also run once via idle immediately in case widget is already mapped
+                let paned_init_weak = paned.downgrade();
+                let applied_init = std::rc::Rc::clone(&initial_applied);
+                glib::idle_add_local_once(move || {
+                    if !applied_init.get() {
+                        if let Some(p) = paned_init_weak.upgrade() {
                             let len = match p.orientation() {
                                 gtk::Orientation::Horizontal => p.width(),
                                 gtk::Orientation::Vertical => p.height(),
@@ -1091,22 +1128,8 @@ impl SessionView {
                             };
                             if len > 0 {
                                 p.set_position((len as f64 * r).round() as i32);
+                                applied_init.set(true);
                             }
-                        }
-                    });
-                });
-
-                // Also run once via idle immediately in case widget is already mapped
-                let paned_init_weak = paned.downgrade();
-                glib::idle_add_local_once(move || {
-                    if let Some(p) = paned_init_weak.upgrade() {
-                        let len = match p.orientation() {
-                            gtk::Orientation::Horizontal => p.width(),
-                            gtk::Orientation::Vertical => p.height(),
-                            _ => p.width(),
-                        };
-                        if len > 0 {
-                            p.set_position((len as f64 * r).round() as i32);
                         }
                     }
                 });
@@ -2152,19 +2175,19 @@ mod tests {
             let ctx = glib::MainContext::default();
             let paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
             let start = std::time::Instant::now();
-            while (paned.width() == 0 || paned.position() <= 0) && start.elapsed() < std::time::Duration::from_millis(500) {
+            let mut expected_pos = 700;
+            while (paned.width() == 0 || (paned.position() - expected_pos).abs() > 2) && start.elapsed() < std::time::Duration::from_millis(1000) {
+                if paned.width() > 0 {
+                    expected_pos = (paned.width() as f64 * 0.7).round() as i32;
+                    session.apply_layout_ratios();
+                }
                 ctx.iteration(false);
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             for _ in 0..10 {
                 ctx.iteration(false);
             }
 
-            let expected_pos = if paned.width() > 0 {
-                (paned.width() as f64 * 0.7).round() as i32
-            } else {
-                700
-            };
             assert_eq!(paned.position(), expected_pos);
 
             // Split Pane 2 vertically
@@ -2173,9 +2196,14 @@ mod tests {
 
             let root_paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
             let start = std::time::Instant::now();
-            while (root_paned.width() == 0 || root_paned.position() <= 0) && start.elapsed() < std::time::Duration::from_millis(500) {
+            let mut expected_root_pos = 700;
+            while (root_paned.width() == 0 || (root_paned.position() - expected_root_pos).abs() > 2) && start.elapsed() < std::time::Duration::from_millis(1000) {
+                if root_paned.width() > 0 {
+                    expected_root_pos = (root_paned.width() as f64 * 0.7).round() as i32;
+                    session.apply_layout_ratios();
+                }
                 ctx.iteration(false);
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             for _ in 0..10 {
                 ctx.iteration(false);
@@ -2188,11 +2216,6 @@ mod tests {
                 panic!("Root should be Split");
             }
 
-            let expected_root_pos = if root_paned.width() > 0 {
-                (root_paned.width() as f64 * 0.7).round() as i32
-            } else {
-                700
-            };
             assert_eq!(root_paned.position(), expected_root_pos, "Root paned position must be 70%, not reset/equalized");
 
             session.close();

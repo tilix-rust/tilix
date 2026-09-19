@@ -1954,7 +1954,7 @@ impl TilixPreferencesWindow {
                 let id = selected_id.borrow().clone();
                 if let Some(prof) = cfg.get_profile(&id) {
                     if let Ok(json) = serde_json::to_string_pretty(&prof.color_scheme) {
-                        let path = glib::user_config_dir().join("tilix").join("schemes");
+                        let path = crate::model::AppConfig::config_dir().join("schemes");
                         let _ = std::fs::create_dir_all(&path);
                         let file_path = path.join(format!("{}.json", prof.color_scheme.name.to_lowercase().replace(' ', "-")));
                         let _ = std::fs::write(&file_path, json);

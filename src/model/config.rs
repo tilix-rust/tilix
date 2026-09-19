@@ -90,8 +90,27 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub fn config_dir() -> PathBuf {
+        #[cfg(test)]
+        {
+            test_config_dir()
+        }
+        #[cfg(not(test))]
+        {
+            if let Ok(dir) = std::env::var("TILIX_CONFIG_DIR") {
+                PathBuf::from(dir)
+            } else {
+                glib::user_config_dir().join("tilix")
+            }
+        }
+    }
+
     pub fn config_path() -> PathBuf {
-        glib::user_config_dir().join("tilix").join("config.json")
+        if let Ok(path) = std::env::var("TILIX_CONFIG_PATH") {
+            PathBuf::from(path)
+        } else {
+            Self::config_dir().join("config.json")
+        }
     }
 
     pub fn load() -> Self {
@@ -230,8 +249,48 @@ impl AppConfig {
 }
 
 #[cfg(test)]
+impl AppConfig {
+    pub fn reset_test_config() {
+        let path = Self::config_path();
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+fn test_config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("TILIX_CONFIG_DIR") {
+        return PathBuf::from(dir);
+    }
+    use std::sync::OnceLock;
+    static TEST_DIR: OnceLock<PathBuf> = OnceLock::new();
+    TEST_DIR
+        .get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "tilix_test_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        })
+        .clone()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_app_config_test_isolation() {
+        let test_dir = AppConfig::config_dir();
+        let test_path = AppConfig::config_path();
+        assert!(test_dir.starts_with(std::env::temp_dir()));
+        assert_eq!(test_path, test_dir.join("config.json"));
+        assert_ne!(test_dir, glib::user_config_dir().join("tilix"));
+    }
 
     #[test]
     fn test_app_config_default_values() {

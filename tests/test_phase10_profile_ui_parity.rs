@@ -304,6 +304,9 @@ fn test_phase10_profile_crud_actions() {
         del_btn.emit_clicked();
         let cfg4 = AppConfig::load();
         assert_eq!(cfg4.profiles.len(), cfg2.profiles.len() - 1);
+
+        // Clean up test config
+        AppConfig::reset_test_config();
     });
 }
 

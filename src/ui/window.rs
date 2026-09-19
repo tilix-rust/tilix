@@ -1061,9 +1061,7 @@ impl TilixWindow {
                     let model = s.model();
                     let template = SessionLayoutTemplate::from_session(&title, &model);
                     if let Ok(json) = template.to_json() {
-                        let mut path = glib::user_config_dir();
-                        path.push("tilix");
-                        path.push("templates");
+                        let path = crate::model::AppConfig::config_dir().join("templates");
                         let _ = std::fs::create_dir_all(&path);
                         let file_name = format!("{}.json", title.replace(['/', '\\', ' '], "_"));
                         let _ = std::fs::write(path.join(&file_name), &json);
@@ -1088,10 +1086,7 @@ impl TilixWindow {
                 let Some(tv) = tv_weak.upgrade() else { return; };
 
                 let mut template_opt = None;
-                let mut path = glib::user_config_dir();
-                path.push("tilix");
-                path.push("templates");
-                path.push("latest.json");
+                let path = crate::model::AppConfig::config_dir().join("templates").join("latest.json");
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(tpl) = SessionLayoutTemplate::from_json(&content) {
                         template_opt = Some(tpl);
