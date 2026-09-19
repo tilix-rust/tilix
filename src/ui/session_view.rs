@@ -1947,14 +1947,20 @@ mod tests {
             window.present();
 
             let ctx = glib::MainContext::default();
+            let start = std::time::Instant::now();
+            while (paned.width() == 0 || paned.position() <= 0) && start.elapsed() < std::time::Duration::from_millis(500) {
+                ctx.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             for _ in 0..10 {
                 ctx.iteration(false);
             }
 
             // Simulate drag_begin, drag_update, drag_end
             use glib::prelude::*;
-            drag.emit_by_name::<()>("drag-begin", &[&200.0f64, &100.0f64]);
-            paned.set_position(280);
+            let initial_pos = paned.position() as f64;
+            drag.emit_by_name::<()>("drag-begin", &[&initial_pos, &100.0f64]);
+            paned.set_position(paned.position() + 80);
             drag.emit_by_name::<()>("drag-update", &[&80.0f64, &0.0f64]);
             drag.emit_by_name::<()>("drag-end", &[&80.0f64, &0.0f64]);
 
@@ -1986,6 +1992,11 @@ mod tests {
             window.present();
 
             let ctx = glib::MainContext::default();
+            let start = std::time::Instant::now();
+            while (paned.width() == 0 || !paned.is_mapped()) && start.elapsed() < std::time::Duration::from_millis(500) {
+                ctx.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             for _ in 0..10 {
                 ctx.iteration(false);
             }
@@ -2004,26 +2015,33 @@ mod tests {
                 h.insert_after(&paned, Some(end));
             }
 
-            // Hit test: line is drawn at x = 200 (width = 1px).
-            // Left of line: [194..200] (6px) picked as separator.
-            // Right of line: [201..207] (6px) picked as separator.
-            // Outside: < 194 or > 207 picked as button.
-            for x in [194.0, 196.0, 198.0, 200.0, 201.0, 204.0, 207.0] {
+            // Ensure position is established
+            let pos = paned.position() as f64;
+            let center = if pos > 0.0 { pos } else { 200.0 };
+
+            // Hit test: line is drawn at center (width = 1px).
+            // Left of line: [center - 6.0 .. center] (6px) picked as separator.
+            // Right of line: [center + 1.0 .. center + 7.0] (6px) picked as separator.
+            // Outside: < center - 6.0 or > center + 7.0 picked as button.
+            for offset in [-6.0, -4.0, -2.0, 0.0, 1.0, 4.0, 7.0] {
+                let x = center + offset;
                 let picked = paned.pick(x, 150.0, gtk::PickFlags::DEFAULT);
                 assert_eq!(
                     picked.map(|w| w.css_name().to_string()),
                     Some("separator".to_string()),
-                    "x={} should be picked as separator",
-                    x
+                    "x={} (offset={}) should be picked as separator around center={}",
+                    x,
+                    offset,
+                    center
                 );
             }
             // Outside the 6px margin
             assert_eq!(
-                paned.pick(193.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
+                paned.pick(center - 7.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
                 Some("button".to_string())
             );
             assert_eq!(
-                paned.pick(208.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
+                paned.pick(center + 8.0, 150.0, gtk::PickFlags::DEFAULT).map(|w| w.css_name().to_string()),
                 Some("button".to_string())
             );
         });
