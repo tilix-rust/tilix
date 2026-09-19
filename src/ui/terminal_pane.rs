@@ -1213,10 +1213,16 @@ impl TerminalPane {
     }
 
     pub fn copy_clipboard(&self) {
+        if !self.terminal.is_realized() {
+            return;
+        }
         self.terminal.copy_clipboard_format(vte4::Format::Text);
     }
 
     pub fn copy_html(&self) {
+        if !self.terminal.is_realized() {
+            return;
+        }
         let html_opt = self.terminal.text_selected(vte4::Format::Html);
         let plain_opt = self.terminal.text_selected(vte4::Format::Text);
 
@@ -1241,14 +1247,23 @@ impl TerminalPane {
     }
 
     pub fn paste_clipboard(&self) {
+        if !self.terminal.is_realized() {
+            return;
+        }
         self.terminal.paste_clipboard();
     }
 
     pub fn paste_primary(&self) {
+        if !self.terminal.is_realized() {
+            return;
+        }
         self.terminal.paste_primary();
     }
 
     pub fn select_all(&self) {
+        if !self.terminal.is_realized() {
+            return;
+        }
         self.terminal.select_all();
     }
 
