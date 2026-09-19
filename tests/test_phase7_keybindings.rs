@@ -15,7 +15,7 @@ use model::keybindings::{
 
 #[test]
 fn test_action_catalog_integrity_and_default_uniqueness() {
-    assert_eq!(ACTION_CATALOG.len(), 27);
+    assert_eq!(ACTION_CATALOG.len(), 32);
 
     let mut ids = std::collections::HashSet::new();
     let mut default_accel_map: std::collections::HashMap<String, &'static str> =
@@ -55,6 +55,7 @@ fn test_action_categories_and_titles() {
     assert_eq!(ActionCategory::SplitsAndLayout.title(), "Splits & Layout");
     assert_eq!(ActionCategory::Navigation.title(), "Navigation");
     assert_eq!(ActionCategory::ViewAndSettings.title(), "View & Settings");
+    assert_eq!(ActionCategory::Clipboard.title(), "Clipboard & Edit");
 
     let session_actions: Vec<_> = ACTION_CATALOG
         .iter()
@@ -72,11 +73,16 @@ fn test_action_categories_and_titles() {
         .iter()
         .filter(|d| d.category == ActionCategory::ViewAndSettings)
         .collect();
+    let clipboard_actions: Vec<_> = ACTION_CATALOG
+        .iter()
+        .filter(|d| d.category == ActionCategory::Clipboard)
+        .collect();
 
     assert_eq!(session_actions.len(), 14);
     assert_eq!(split_actions.len(), 4);
     assert_eq!(nav_actions.len(), 4);
     assert_eq!(view_actions.len(), 5);
+    assert_eq!(clipboard_actions.len(), 5);
 }
 
 #[test]

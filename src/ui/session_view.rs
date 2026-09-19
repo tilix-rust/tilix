@@ -500,6 +500,36 @@ impl SessionView {
         }
     }
 
+    pub fn copy_clipboard_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.copy_clipboard();
+        }
+    }
+
+    pub fn copy_html_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.copy_html();
+        }
+    }
+
+    pub fn paste_clipboard_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.paste_clipboard();
+        }
+    }
+
+    pub fn paste_primary_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.paste_primary();
+        }
+    }
+
+    pub fn select_all_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.select_all();
+        }
+    }
+
     pub fn sync_input_enabled(&self) -> bool {
         self.model.borrow().sync_input_enabled
     }

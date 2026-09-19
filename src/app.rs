@@ -187,13 +187,12 @@ pub fn calculate_target_dpi(
             Ok(v) if v > 0.0 => v,
             _ => return None,
         }
-    } else if let Some(scale_str) = gdk_scale {
+    } else {
+        let scale_str = gdk_scale?;
         match scale_str.parse::<f64>() {
             Ok(scale) if scale > 1.0 => 1.0 / scale,
             _ => return None,
         }
-    } else {
-        return None;
     };
 
     // 5. 将 dpi * GDK_DPI_SCALE 的值作为目标 DPI

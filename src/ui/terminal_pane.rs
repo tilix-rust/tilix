@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::os::unix::io::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -11,7 +12,9 @@ use crate::model::{
     ColorScheme, CursorBlinkPreference, CursorShapePreference, DockPosition,
     ExitActionPreference, PaneId, Profile, SplitOrientation,
 };
-use crate::pty::{default_env, detect_shell, parse_osc7_uri};
+use crate::pty::{
+    default_env, detect_shell, parse_osc7_uri, Osc52Operation, Osc52Target, PtyProxy,
+};
 
 type CloseCallback = Box<dyn Fn(PaneId)>;
 type SplitCallback = Box<dyn Fn(PaneId, SplitOrientation)>;
@@ -59,6 +62,7 @@ pub struct TerminalPane {
     child_pid: Rc<Cell<Option<i32>>>,
     current_directory: Rc<RefCell<Option<PathBuf>>>,
     current_profile: Rc<RefCell<Profile>>,
+    pty_proxy: Rc<RefCell<Option<std::sync::Arc<crate::pty::PtyProxy>>>>,
     is_sync_enabled: Rc<Cell<bool>>,
     is_closing: Rc<Cell<bool>>,
     close_callbacks: Rc<RefCell<Vec<CloseCallback>>>,
@@ -217,6 +221,11 @@ impl TerminalPane {
         let raw_title = Rc::new(RefCell::new("Terminal".to_string()));
         let current_profile = Rc::new(RefCell::new(Profile::default()));
 
+        // Pre-configure VTE natural geometry to profile default size (e.g. 80x24)
+        let default_cols = current_profile.borrow().default_size_columns.max(1) as i64;
+        let default_rows = current_profile.borrow().default_size_rows.max(1) as i64;
+        terminal.set_size(default_cols, default_rows);
+
         let initial_formatted_title = Self::format_pane_title(
             &current_profile.borrow(),
             pane_id,
@@ -238,6 +247,7 @@ impl TerminalPane {
         };
 
         let child_pid: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
+        let pty_proxy: Rc<RefCell<Option<std::sync::Arc<PtyProxy>>>> = Rc::new(RefCell::new(None));
         let is_sync_enabled = Rc::new(Cell::new(true));
         let is_closing = Rc::new(Cell::new(false));
         let close_callbacks: Rc<RefCell<Vec<CloseCallback>>> = Rc::new(RefCell::new(Vec::new()));
@@ -314,6 +324,7 @@ impl TerminalPane {
             let title_lbl = title_label.clone();
             let current_dir = Rc::clone(&current_directory);
             let pid_cell = Rc::clone(&child_pid);
+            let pty_proxy_exit = Rc::clone(&pty_proxy);
 
             terminal.connect_child_exited(move |term, status| {
                 pid_cell.set(None);
@@ -329,6 +340,7 @@ impl TerminalPane {
                 let action = profile_rc.borrow().exit_action;
                 match action {
                     ExitActionPreference::Close => {
+                        is_closing.set(true);
                         if let Ok(list) = close_cbs.try_borrow() {
                             for cb in list.iter() {
                                 cb(pane_id);
@@ -337,7 +349,14 @@ impl TerminalPane {
                     }
                     ExitActionPreference::Restart => {
                         let dir = current_dir.borrow().clone();
-                        Self::spawn_shell_process(term, &profile_rc.borrow(), dir.as_deref(), &pid_cell, None);
+                        Self::spawn_shell_process(
+                            term,
+                            &profile_rc.borrow(),
+                            dir.as_deref(),
+                            &pid_cell,
+                            Some(&pty_proxy_exit),
+                            None,
+                        );
                     }
                     ExitActionPreference::Hold => {
                         let curr_title = title_lbl.text();
@@ -473,7 +492,90 @@ impl TerminalPane {
             });
         }
 
-        // Spawn initial shell process asynchronously and wire title refresh on spawn
+        // Setup terminal context menu
+        let menu = gio::Menu::new();
+
+        // Section 1: Clipboard
+        let clip_section = gio::Menu::new();
+        clip_section.append(Some("Copy"), Some("win.copy"));
+        clip_section.append(Some("Copy as HTML"), Some("win.copy-html"));
+        clip_section.append(Some("Paste"), Some("win.paste"));
+        clip_section.append(Some("Paste Primary Selection"), Some("win.paste-primary"));
+        menu.append_section(None, &clip_section);
+
+        // Section 2: Selection
+        let sel_section = gio::Menu::new();
+        sel_section.append(Some("Select All"), Some("win.select-all"));
+        menu.append_section(None, &sel_section);
+
+        // Section 3: Splits
+        let split_section = gio::Menu::new();
+        split_section.append(Some("Split Right"), Some("win.split-right"));
+        split_section.append(Some("Split Down"), Some("win.split-down"));
+        split_section.append(Some("Close Terminal"), Some("win.close-pane"));
+        menu.append_section(None, &split_section);
+
+        // Section 4: Preferences
+        let pref_section = gio::Menu::new();
+        pref_section.append(Some("Preferences..."), Some("win.preferences"));
+        menu.append_section(None, &pref_section);
+
+        terminal.set_context_menu_model(Some(&menu));
+
+        // Connect copy-on-select
+        let profile_copy_select = Rc::clone(&current_profile);
+        terminal.connect_selection_changed(move |term| {
+            if profile_copy_select.borrow().copy_on_select && term.has_selection() {
+                term.copy_clipboard_format(vte::Format::Text);
+            }
+        });
+
+        // Synchronize terminal window size to PTY proxy on dimension / font changes
+        {
+            let pty_proxy_size = Rc::clone(&pty_proxy);
+            let update_size = Rc::new(move |term: &vte::Terminal| {
+                if let Some(ref proxy) = *pty_proxy_size.borrow() {
+                    let rows = term.row_count();
+                    let cols = term.column_count();
+                    let r = if rows > 0 { rows as u16 } else { 24 };
+                    let c = if cols > 0 { cols as u16 } else { 80 };
+                    proxy.set_window_size(r, c);
+                }
+            });
+
+            let u1 = Rc::clone(&update_size);
+            terminal.connect_char_size_changed(move |term, _w, _h| {
+                u1(term);
+            });
+
+            let u2 = Rc::clone(&update_size);
+            terminal.connect_resize_window(move |term, _w, _h| {
+                u2(term);
+            });
+
+            // Frame-synchronous size sync: ensures initial allocation and runtime resizing
+            // immediately propagate to PTY proxy inner master before shell prompt draws.
+            let pty_proxy_tick = Rc::clone(&pty_proxy);
+            let last_cols = Cell::new(0i64);
+            let last_rows = Cell::new(0i64);
+            terminal.add_tick_callback(move |term, _clock| {
+                let cols = term.column_count();
+                let rows = term.row_count();
+                if cols > 0 && rows > 0 && (cols != last_cols.get() || rows != last_rows.get()) {
+                    last_cols.set(cols);
+                    last_rows.set(rows);
+                    if let Some(ref proxy) = *pty_proxy_tick.borrow() {
+                        proxy.set_window_size(rows as u16, cols as u16);
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+
+        // Spawn initial shell process:
+        // If terminal dimensions are already allocated (e.g. split pane or existing window), spawn immediately.
+        // If not yet allocated (first pane of a new window), wait for the first render frame (add_tick_callback)
+        // so the PTY proxy and child shell initialize with exact window dimensions (avoiding zsh prompt race and '%').
         {
             let prof_rc = Rc::clone(&current_profile);
             let cwd_clone = Rc::clone(&current_directory);
@@ -481,32 +583,90 @@ impl TerminalPane {
             let is_sync_clone = Rc::clone(&is_sync_enabled);
             let title_cbs = Rc::clone(&title_callbacks);
             let widgets = pane_widgets.clone();
-            Self::spawn_shell_process(
-                &terminal,
-                &current_profile.borrow(),
-                effective_dir.as_deref(),
-                &child_pid,
-                Some(Box::new(move |pid| {
-                    Self::refresh_title_static(
-                        &widgets,
-                        &prof_rc,
-                        &cwd_clone,
+            let term_for_spawn = terminal.clone();
+            let pty_proxy_spawn = Rc::clone(&pty_proxy);
+            let spawned_flag = Rc::new(Cell::new(false));
+
+            let do_spawn = {
+                let spawned_flag = Rc::clone(&spawned_flag);
+                Rc::new(move || {
+                    if spawned_flag.get() {
+                        return;
+                    }
+                    spawned_flag.set(true);
+
+                    let prof_rc = Rc::clone(&prof_rc);
+                    let cwd_clone = Rc::clone(&cwd_clone);
+                    let pid_clone = Rc::clone(&pid_clone);
+                    let is_sync_clone = Rc::clone(&is_sync_clone);
+                    let title_cbs = Rc::clone(&title_cbs);
+                    let widgets = widgets.clone();
+
+                    let prof_for_cb = Rc::clone(&prof_rc);
+                    let pid_for_cb = Rc::clone(&pid_clone);
+                    let prof_snapshot = prof_rc.borrow().clone();
+
+                    Self::spawn_shell_process(
+                        &term_for_spawn,
+                        &prof_snapshot,
+                        effective_dir.as_deref(),
                         &pid_clone,
-                        &is_sync_clone,
-                        pane_id,
-                        &title_cbs,
+                        Some(&pty_proxy_spawn),
+                        Some(Box::new(move |pid| {
+                            Self::refresh_title_static(
+                                &widgets,
+                                &prof_for_cb,
+                                &cwd_clone,
+                                &pid_for_cb,
+                                &is_sync_clone,
+                                pane_id,
+                                &title_cbs,
+                            );
+                            let dir = cwd_clone.borrow().clone();
+                            Self::check_auto_switch_static(
+                                &prof_for_cb,
+                                dir.as_deref(),
+                                pane_id,
+                                &widgets,
+                                Some(pid),
+                                is_sync_clone.get(),
+                            );
+                        })),
                     );
-                    let dir = cwd_clone.borrow().clone();
-                    Self::check_auto_switch_static(
-                        &prof_rc,
-                        dir.as_deref(),
-                        pane_id,
-                        &widgets,
-                        Some(pid),
-                        is_sync_clone.get(),
-                    );
-                })),
-            );
+                })
+            };
+
+            let has_allocated_geometry = terminal.is_mapped()
+                && terminal.width() > 0
+                && terminal.column_count() > 0
+                && terminal.row_count() > 0;
+
+            if has_allocated_geometry {
+                do_spawn();
+            } else {
+                let do_spawn_tick = Rc::clone(&do_spawn);
+                terminal.add_tick_callback(move |term, _clock| {
+                    if term.is_mapped() && term.width() > 0 && term.column_count() > 0 && term.row_count() > 0 {
+                        do_spawn_tick();
+                        glib::ControlFlow::Break
+                    } else {
+                        glib::ControlFlow::Continue
+                    }
+                });
+
+                let do_spawn_map = Rc::clone(&do_spawn);
+                terminal.connect_map(move |term| {
+                    if term.width() > 0 && term.column_count() > 0 && term.row_count() > 0 {
+                        do_spawn_map();
+                    }
+                });
+
+                // Fallback for headless testing environments or unmapped offscreen widgets
+                let do_spawn_fallback = do_spawn;
+                glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+                    do_spawn_fallback();
+                });
+            }
         }
 
         Self {
@@ -529,6 +689,7 @@ impl TerminalPane {
             child_pid,
             current_directory,
             current_profile,
+            pty_proxy,
             is_sync_enabled,
             is_closing,
             close_callbacks,
@@ -676,6 +837,7 @@ impl TerminalPane {
         profile: &Profile,
         directory: Option<&Path>,
         child_pid: &Rc<Cell<Option<i32>>>,
+        pty_proxy_slot: Option<&Rc<RefCell<Option<std::sync::Arc<crate::pty::PtyProxy>>>>>,
         on_spawned: Option<Box<dyn Fn(i32)>>,
     ) {
         let shell = detect_shell();
@@ -684,8 +846,159 @@ impl TerminalPane {
         let init_dir_str = directory.and_then(|p| p.to_str());
         let (_cmd, argv) = crate::pty::shell::build_spawn_args(profile, &shell);
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-
         let pid_cell = Rc::clone(child_pid);
+
+        if profile.enable_osc52 {
+            match PtyProxy::new() {
+                Ok(proxy) => {
+                    let proxy = std::sync::Arc::new(proxy);
+
+                    // Initialize terminal window size on proxy (defaults to profile configured size if 0)
+                    let rows = terminal.row_count();
+                    let cols = terminal.column_count();
+                    let r = if rows > 0 { rows as u16 } else { profile.default_size_rows.max(24) as u16 };
+                    let c = if cols > 0 { cols as u16 } else { profile.default_size_columns.max(80) as u16 };
+                    proxy.set_window_size(r, c);
+
+                    let om_fd = match proxy.take_outer_master() {
+                        Some(fd) => fd,
+                        None => {
+                            glib::g_warning!("Tilix", "Outer master FD unavailable in PtyProxy");
+                            return;
+                        }
+                    };
+                    let owned = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(om_fd) };
+                    match vte::Pty::foreign_sync(owned, gio::Cancellable::NONE) {
+                        Ok(vte_pty) => {
+                            let _ = vte_pty.set_size(r as i32, c as i32);
+                            terminal.set_pty(Some(&vte_pty));
+
+                            let allow_query = profile.osc52_allow_query;
+                            let proxy_clone = std::sync::Arc::clone(&proxy);
+                            proxy.start(
+                                move |event| {
+                                    glib::idle_add_once(move || {
+                                        let display = gtk::gdk::Display::default();
+                                        match event.operation {
+                                            Osc52Operation::Write(ref data) => {
+                                                if let Ok(text) = std::str::from_utf8(data) {
+                                                    for target in &event.targets {
+                                                        match target {
+                                                            Osc52Target::Clipboard => {
+                                                                if let Some(disp) = &display {
+                                                                    disp.clipboard().set_text(text);
+                                                                }
+                                                            }
+                                                            Osc52Target::Primary => {
+                                                                if let Some(disp) = &display {
+                                                                    disp.primary_clipboard().set_text(text);
+                                                                }
+                                                            }
+                                                            _ => {
+                                                                if let Some(disp) = &display {
+                                                                    disp.clipboard().set_text(text);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Osc52Operation::Clear => {
+                                                for target in &event.targets {
+                                                    match target {
+                                                        Osc52Target::Clipboard => {
+                                                            if let Some(disp) = &display {
+                                                                disp.clipboard().set_text("");
+                                                            }
+                                                        }
+                                                        Osc52Target::Primary => {
+                                                            if let Some(disp) = &display {
+                                                                disp.primary_clipboard().set_text("");
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            Osc52Operation::Query => {}
+                                        }
+                                    });
+                                },
+                                move |_targets| {
+                                    if !allow_query {
+                                        return None;
+                                    }
+                                    // Synchronous querying across threads is disabled for security and thread-safety
+                                    None
+                                },
+                            );
+
+                            use std::os::unix::process::CommandExt;
+                            use std::process::Stdio;
+
+                            let inner_slave = proxy.inner_slave_fd();
+                            let stdin_fd = unsafe { libc::dup(inner_slave) };
+                            let stdout_fd = unsafe { libc::dup(inner_slave) };
+                            let stderr_fd = unsafe { libc::dup(inner_slave) };
+
+                            let cmd_path = &argv[0];
+                            let mut cmd = std::process::Command::new(cmd_path);
+                            if argv.len() > 1 {
+                                cmd.args(&argv[1..]);
+                            }
+                            if let Some(dir) = directory {
+                                cmd.current_dir(dir);
+                            }
+                            for env_var in &env_vars {
+                                if let Some((k, v)) = env_var.split_once('=') {
+                                    cmd.env(k, v);
+                                }
+                            }
+                            cmd.stdin(unsafe { Stdio::from_raw_fd(stdin_fd) });
+                            cmd.stdout(unsafe { Stdio::from_raw_fd(stdout_fd) });
+                            cmd.stderr(unsafe { Stdio::from_raw_fd(stderr_fd) });
+
+                            unsafe {
+                                cmd.pre_exec(move || {
+                                    libc::setsid();
+                                    libc::ioctl(0, libc::TIOCSCTTY, 1);
+                                    Ok(())
+                                });
+                            }
+
+                            match cmd.spawn() {
+                                Ok(child) => {
+                                    // Close parent process copy of inner_slave so inner_master gets EOF when child exits
+                                    proxy.close_inner_slave();
+
+                                    let pid = child.id() as i32;
+                                    pid_cell.set(Some(pid));
+                                    terminal.watch_child(glib::Pid(pid));
+                                    if let Some(slot) = pty_proxy_slot {
+                                        *slot.borrow_mut() = Some(proxy_clone);
+                                    }
+                                    if let Some(ref cb) = on_spawned {
+                                        cb(pid);
+                                    }
+                                    return;
+                                }
+                                Err(e) => {
+                                    proxy.close_inner_slave();
+                                    glib::g_warning!("Tilix", "Failed to spawn child with PTY proxy: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            glib::g_warning!("Tilix", "Failed to create foreign PTY: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    glib::g_warning!("Tilix", "Failed to create PTY proxy: {}", e);
+                }
+            }
+        }
+
         terminal.spawn_async(
             vte::PtyFlags::DEFAULT,
             init_dir_str,
@@ -897,6 +1210,54 @@ impl TerminalPane {
     pub fn zoom_normal(&self) {
         self.font_scale.set(ZOOM_NORMAL);
         self.terminal.set_font_scale(ZOOM_NORMAL);
+    }
+
+    pub fn copy_clipboard(&self) {
+        self.terminal.copy_clipboard_format(vte4::Format::Text);
+    }
+
+    pub fn copy_html(&self) {
+        let html_opt = self.terminal.text_selected(vte4::Format::Html);
+        let plain_opt = self.terminal.text_selected(vte4::Format::Text);
+
+        if let (Some(html_str), Some(plain_str)) = (html_opt, plain_opt) {
+            if let Some(display) = gtk::gdk::Display::default() {
+                let html_bytes = glib::Bytes::from(html_str.as_bytes());
+                let plain_bytes = glib::Bytes::from(plain_str.as_bytes());
+                let html_provider = gtk::gdk::ContentProvider::for_bytes("text/html", &html_bytes);
+                let plain_provider =
+                    gtk::gdk::ContentProvider::for_bytes("text/plain;charset=utf-8", &plain_bytes);
+                let text_provider = gtk::gdk::ContentProvider::for_bytes("text/plain", &plain_bytes);
+                let union_provider = gtk::gdk::ContentProvider::new_union(&[
+                    html_provider,
+                    plain_provider,
+                    text_provider,
+                ]);
+                let _ = display.clipboard().set_content(Some(&union_provider));
+                return;
+            }
+        }
+        self.terminal.copy_clipboard_format(vte4::Format::Html);
+    }
+
+    pub fn paste_clipboard(&self) {
+        self.terminal.paste_clipboard();
+    }
+
+    pub fn paste_primary(&self) {
+        self.terminal.paste_primary();
+    }
+
+    pub fn select_all(&self) {
+        self.terminal.select_all();
+    }
+
+    pub fn context_menu_model(&self) -> Option<gio::MenuModel> {
+        self.terminal.context_menu_model()
+    }
+
+    pub fn pty_proxy(&self) -> Option<std::sync::Arc<crate::pty::PtyProxy>> {
+        self.pty_proxy.borrow().clone()
     }
 
     pub fn grab_focus(&self) {
@@ -1171,6 +1532,9 @@ impl TerminalPane {
 
     pub fn apply_profile(&self, profile: &Profile) {
         *self.current_profile.borrow_mut() = profile.clone();
+        let default_cols = profile.default_size_columns.max(1) as i64;
+        let default_rows = profile.default_size_rows.max(1) as i64;
+        self.terminal.set_size(default_cols, default_rows);
         let dir = self.current_directory();
         let widgets = PaneWidgets {
             terminal: self.terminal.clone(),

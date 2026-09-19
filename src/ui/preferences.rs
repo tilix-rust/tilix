@@ -720,6 +720,10 @@ impl TilixPreferencesWindow {
         gen_grid.attach(&bell_lbl, 0, 13, 1, 1);
         gen_grid.attach(&bell_combo, 1, 13, 1, 1);
 
+        let copy_on_select_check =
+            gtk::CheckButton::with_label("Automatically copy selection to clipboard");
+        gen_grid.attach(&copy_on_select_check, 1, 14, 1, 1);
+
         let gen_scrolled = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
@@ -1071,6 +1075,14 @@ impl TilixPreferencesWindow {
         compat_grid.attach(&cjk_lbl, 0, 3, 1, 1);
         compat_grid.attach(&cjk_combo, 1, 3, 1, 1);
 
+        let osc52_check =
+            gtk::CheckButton::with_label("Allow terminal applications to set clipboard (OSC 52)");
+        compat_grid.attach(&osc52_check, 1, 4, 1, 1);
+
+        let osc52_query_check =
+            gtk::CheckButton::with_label("Allow terminal applications to read clipboard (OSC 52 query)");
+        compat_grid.attach(&osc52_query_check, 1, 5, 1, 1);
+
         let compat_scrolled = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
@@ -1370,6 +1382,9 @@ impl TilixPreferencesWindow {
 
             let sil_r = silence_check.clone();
             let sil_th_r = silence_thresh_spin.clone();
+            let copy_on_select_r = copy_on_select_check.clone();
+            let osc52_r = osc52_check.clone();
+            let osc52_query_r = osc52_query_check.clone();
             let refresh_rules = Rc::clone(&refresh_rules_list);
 
             Rc::new(move |p: &Profile| {
@@ -1536,6 +1551,10 @@ impl TilixPreferencesWindow {
                 sil_r.set_active(p.notify_silence_enabled);
                 sil_th_r.set_value(p.notify_silence_threshold as f64);
 
+                copy_on_select_r.set_active(p.copy_on_select);
+                osc52_r.set_active(p.enable_osc52);
+                osc52_query_r.set_active(p.osc52_allow_query);
+
                 refresh_rules();
 
                 is_populating.set(false);
@@ -1654,6 +1673,9 @@ impl TilixPreferencesWindow {
 
             let sil_r = silence_check.clone();
             let sil_th_r = silence_thresh_spin.clone();
+            let copy_on_select_r = copy_on_select_check.clone();
+            let osc52_r = osc52_check.clone();
+            let osc52_query_r = osc52_query_check.clone();
 
             Rc::new(move || {
                 if is_populating.get() {
@@ -1778,6 +1800,10 @@ impl TilixPreferencesWindow {
 
                 prof.notify_silence_enabled = sil_r.is_active();
                 prof.notify_silence_threshold = sil_th_r.value() as u32;
+
+                prof.copy_on_select = copy_on_select_r.is_active();
+                prof.enable_osc52 = osc52_r.is_active();
+                prof.osc52_allow_query = osc52_query_r.is_active();
 
                 let updated = prof.clone();
                 if updated.id == cfg.default_profile_id {
@@ -2220,6 +2246,10 @@ impl TilixPreferencesWindow {
         connect_sync!(silence_check, notify_active);
         connect_sync!(silence_thresh_spin, value_changed);
 
+        connect_sync!(copy_on_select_check, notify_active);
+        connect_sync!(osc52_check, notify_active);
+        connect_sync!(osc52_query_check, notify_active);
+
         // Action button callbacks: Add Profile
         {
             let config_rc = Rc::clone(&current_config);
@@ -2602,6 +2632,7 @@ impl TilixPreferencesWindow {
             ActionCategory::SplitsAndLayout,
             ActionCategory::Navigation,
             ActionCategory::ViewAndSettings,
+            ActionCategory::Clipboard,
         ];
 
         for category in categories {

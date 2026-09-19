@@ -1,8 +1,8 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.13.0 (Phase 13 Terminal Font Zoom & Alt Drag-and-Drop Pane Docking)  
-**Date:** 2026-09-18  
+**Version:** 0.14.0 (Phase 14 OSC 52 & Desktop Clipboard Integration)  
+**Date:** 2026-09-19  
 
 
 ---
@@ -741,6 +741,61 @@ Target window dimensions are computed from the profile's character grid and acti
   - In `drag_source.connect_begin`: if `require_alt` is true and `ALT_MASK` is absent, the gesture sequence is immediately rejected via `gesture.set_sequence_state(seq, gtk::EventSequenceState::Denied)` (or `gesture.set_state(EventSequenceState::Denied)`).
   - In `drag_source.connect_prepare`: if `require_alt` is true and `ALT_MASK` is absent, returns `None`.
   - This ensures standard terminal text selection, double-click word selection, and link clicking continue uninhibited unless the user explicitly holds `Alt` while initiating a drag.
+
+---
+
+## 26. OSC 52 and Desktop Clipboard Integration (Phase 14)
+
+### 26.1 Pure Domain Streaming OSC 52 Parser (`src/pty/osc52.rs`)
+- **State Machine Architecture:** Zero-dependency streaming parser implemented as a pure-domain state machine (`Osc52StreamParser`). States:
+  - `Ground`: Regular terminal text and passthrough stream emission.
+  - `Escape`: Prefix detection (`ESC` / `0x1B`). Consecutive `ESC` characters are safely preserved.
+  - `OscHeader`: Validates the `52;` sequence prefix; non-52 OSC sequences (such as OSC 7 directory reporting or window title escapes) are transparently returned to passthrough.
+  - `OscTargets`: Parses clipboard targets (`c`, `p`, `q`, `0`..`7`, compound targets like `cp`, or empty defaulting to `c`).
+  - `OscPayload`: Gathers base64 encoded payload bytes up to safety bounds.
+  - `EscapeInPayload`: Handles two-byte 7-bit String Terminator (`\x1b\\`), returning to payload collection if non-terminator bytes follow.
+- **Terminator Detection:** Concurrently supports:
+  - BEL (`\x07`)
+  - 7-bit ST (`\x1b\\`)
+  - 8-bit ST (`0x9C`)
+- **Safety Limits & Memory Exhaustion Prevention:**
+  - `MAX_OSC52_PAYLOAD_SIZE = 5 * 1024 * 1024` (5 MB). Payloads exceeding this safety threshold trigger an immediate safe reset to `Ground`, discarding excessive memory buffers and emitting subsequent stream bytes to passthrough.
+- **Operations & Events:**
+  - `Osc52Operation::Write(Vec<u8>)`: Decodes base64 payload via `glib::base64_decode`.
+  - `Osc52Operation::Query`: Client requests clipboard contents (`?`).
+  - `Osc52Operation::Clear`: Empty payload clearing the specified buffer.
+- **Response Serializer:** `encode_osc52_response(target, data)` encodes binary payloads into standard OSC 52 responses (`\x1b]52;<target>;<base64>\x1b\\`) for queries.
+
+### 26.2 In-Process PTY Proxy Interceptor (`src/pty/proxy.rs`)
+- **Dual-PTY Architecture:** Uses `libc::openpty` to establish two PTY pairs:
+  1. Inner PTY: `(inner_master, inner_slave)` — child process runs attached to `inner_slave` as standard input/output/error.
+  2. Outer PTY: `(outer_master, outer_slave)` — VTE attaches to `outer_master` via `vte::Pty::foreign_sync`.
+- **Bi-directional Worker Threads:**
+  - `tilix-pty-input`: Reads user keystrokes from `outer_slave` and writes to `inner_master`. Synchronizes window sizing ioctls (`TIOCGWINSZ`/`TIOCSWINSZ`) during user interactions.
+  - `tilix-pty-output`: Reads child process output from `inner_master`, passes stream chunks through `Osc52StreamParser`, writes non-OSC passthrough bytes to `outer_slave` for VTE rendering, and dispatches extracted OSC 52 events.
+- **Thread-Safe Main Context Dispatch:** OSC 52 write and clear actions dispatch to the GTK main loop via `glib::idle_add_once`, updating desktop clipboards (`gdk::Display::default().clipboard()` and `primary_clipboard()`).
+- **FD Lifecycle & EOF Propagation:** `PtyProxy` manages all 4 descriptors via `AtomicI32` slots. `ProxyPtyPair` and `PtyProxy` implement `Drop` to release remaining descriptors. The parent process calls `proxy.close_inner_slave()` immediately after `cmd.spawn()` so that `inner_master` receives EOF when the child process exits. `vte::Pty::foreign_sync` takes direct ownership of `outer_master` via `proxy.take_outer_master()`.
+- **Window Size Synchronization (`TIOCSWINSZ` / `SIGWINCH`):** `TerminalPane` initializes the proxy's window size on spawn and listens to terminal dimension events (`connect_char_size_changed`, `connect_resize_window`, `notify::row-count`, `notify::column-count`), forwarding updates via `proxy.set_window_size()`. `tilix-pty-input` concurrently runs `sync_size_from_outer()` on user input forwarding.
+- **Security Posture:** `osc52_allow_query` defaults to `false` in `Profile`, preventing untrusted terminal applications from querying sensitive user data unless explicitly enabled by the user.
+
+### 26.3 Keybinding Catalog Expansion (`src/model/keybindings.rs`)
+- **Expanded Catalog (32 Actions):** Added `ActionCategory::Clipboard` ("Clipboard & Edit") with 5 standard clipboard operations (Cut is omitted as terminal emulator buffers are read-only grid projections):
+  - `win.copy` ("Copy", default accelerators: `<Primary><Shift>c`, `<Primary>Insert`).
+  - `win.copy-html` ("Copy as HTML", default accelerators: none).
+  - `win.paste` ("Paste", default accelerators: `<Primary><Shift>v`, `<Shift>Insert`).
+  - `win.paste-primary` ("Paste Primary Selection", default accelerators: none).
+  - `win.select-all` ("Select All", default accelerators: `<Primary><Shift>a`).
+- **Collision Immunity:** All accelerators verified against existing categories with zero collisions across the complete 32-action catalog.
+
+### 26.4 Context Menu, Copy-on-Select & UI Integration
+- **Terminal Context Menu:** `TerminalPane` constructs a structured `gio::Menu` model with 4 functional sections (Clipboard, Selection, Splits, Preferences) and attaches it via `terminal.set_context_menu_model`.
+- **Multi-Format Copy as HTML:** `copy_html()` creates a `GdkContentProvider` union containing both `text/html` (with ANSI formatting and colors) and `text/plain` fallbacks, ensuring compatibility across both rich-text editors and plain-text terminal pastes.
+- **Frame-Synchronous Dimension Coordination & Mapped-Aware Spawn:** `TerminalPane` pre-configures VTE natural geometry via `terminal.set_size(default_cols, default_rows)` and defers child shell spawning until the widget is mapped with a valid size allocation (`terminal.is_mapped() && terminal.width() > 0 && terminal.column_count() > 0 && terminal.row_count() > 0`). In addition, `PtyProxy::set_window_size` deduplicates dimension updates with atomic caching to prevent redundant `TIOCSWINSZ` ioctls and spurious `SIGWINCH` signals, eliminating the prompt redraw race condition where `zsh` outputs `%` on startup (Tilix issue #1777).
+- **Automatic Copy on Selection:** Connected via `terminal.connect_selection_changed`; when `profile.copy_on_select` is enabled and a selection exists, selected text is copied immediately using `vte4::Format::Text`.
+- **Preferences Integration:**
+  - Shortcuts tab includes `ActionCategory::Clipboard`.
+  - Profile General tab includes `Automatically copy selection to clipboard` checkbutton.
+  - Profile Compatibility tab includes `Allow terminal applications to set clipboard (OSC 52)` and `Allow terminal applications to read clipboard (OSC 52 query)` checkbuttons.
 
 
 

@@ -8,6 +8,7 @@ pub enum ActionCategory {
     SplitsAndLayout,
     Navigation,
     ViewAndSettings,
+    Clipboard,
 }
 
 impl ActionCategory {
@@ -17,6 +18,7 @@ impl ActionCategory {
             Self::SplitsAndLayout => "Splits & Layout",
             Self::Navigation => "Navigation",
             Self::ViewAndSettings => "View & Settings",
+            Self::Clipboard => "Clipboard & Edit",
         }
     }
 }
@@ -230,6 +232,42 @@ pub static ACTION_CATALOG: &[ActionShortcutDef] = &[
         category: ActionCategory::ViewAndSettings,
         default_accels: &["<Primary>0", "<Primary>KP_0"],
     },
+    // Clipboard & Edit (6 actions)
+    ActionShortcutDef {
+        id: "win.copy",
+        title: "Copy",
+        description: "Copy selected text to clipboard",
+        category: ActionCategory::Clipboard,
+        default_accels: &["<Primary><Shift>c", "<Primary>Insert"],
+    },
+    ActionShortcutDef {
+        id: "win.copy-html",
+        title: "Copy as HTML",
+        description: "Copy selected text with formatting as HTML",
+        category: ActionCategory::Clipboard,
+        default_accels: &[],
+    },
+    ActionShortcutDef {
+        id: "win.paste",
+        title: "Paste",
+        description: "Paste clipboard text into active terminal",
+        category: ActionCategory::Clipboard,
+        default_accels: &["<Primary><Shift>v", "<Shift>Insert"],
+    },
+    ActionShortcutDef {
+        id: "win.paste-primary",
+        title: "Paste Primary Selection",
+        description: "Paste primary selection text into active terminal",
+        category: ActionCategory::Clipboard,
+        default_accels: &[],
+    },
+    ActionShortcutDef {
+        id: "win.select-all",
+        title: "Select All",
+        description: "Select all text in terminal buffer",
+        category: ActionCategory::Clipboard,
+        default_accels: &["<Primary><Shift>a"],
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,8 +480,10 @@ mod tests {
 
     #[test]
     fn test_action_catalog_completeness() {
-        assert_eq!(ACTION_CATALOG.len(), 27);
-        let ids: Vec<&str> = ACTION_CATALOG.iter().map(|d| d.id).collect();
+        assert_eq!(ACTION_CATALOG.len(), 32);
+        let ids: std::collections::HashSet<&str> =
+            ACTION_CATALOG.iter().map(|d| d.id).collect();
+        assert_eq!(ids.len(), 32);
         assert!(ids.contains(&"win.new-tab"));
         assert!(ids.contains(&"win.close-pane"));
         assert!(ids.contains(&"win.close-tab"));
@@ -462,6 +502,11 @@ mod tests {
         assert!(ids.contains(&"win.zoom-in"));
         assert!(ids.contains(&"win.zoom-out"));
         assert!(ids.contains(&"win.zoom-normal"));
+        assert!(ids.contains(&"win.copy"));
+        assert!(ids.contains(&"win.copy-html"));
+        assert!(ids.contains(&"win.paste"));
+        assert!(ids.contains(&"win.paste-primary"));
+        assert!(ids.contains(&"win.select-all"));
         for i in 1..=9 {
             let action_id = format!("win.switch-tab-{}", i);
             assert!(ids.contains(&action_id.as_str()));

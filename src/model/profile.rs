@@ -280,6 +280,11 @@ pub struct Profile {
     pub triggers: Vec<TriggerRule>,
     pub notify_silence_enabled: bool,
     pub notify_silence_threshold: u32,
+
+    // Clipboard & OSC 52 Settings
+    pub copy_on_select: bool,
+    pub enable_osc52: bool,
+    pub osc52_allow_query: bool,
 }
 
 impl Default for Profile {
@@ -353,6 +358,11 @@ impl Default for Profile {
             triggers: Vec::new(),
             notify_silence_enabled: false,
             notify_silence_threshold: 10,
+
+            // Clipboard & OSC 52 Settings
+            copy_on_select: false,
+            enable_osc52: true,
+            osc52_allow_query: false,
         }
     }
 }
@@ -578,5 +588,37 @@ mod tests {
         };
         assert!(wildcard_rule.matches("any-host", Path::new("/projects/rust")));
         assert!(!wildcard_rule.matches("any-host", Path::new("/home/user")));
+    }
+
+    #[test]
+    fn test_profile_clipboard_defaults_and_backwards_compatibility() {
+        let default_profile = Profile::default();
+        assert!(!default_profile.copy_on_select);
+        assert!(default_profile.enable_osc52);
+        assert!(!default_profile.osc52_allow_query);
+
+        // Deserialization without Phase 14 keys
+        let legacy_json = r#"{
+            "id": "legacy_clip",
+            "name": "Legacy Clipboard Test"
+        }"#;
+        let deserialized: Profile = serde_json::from_str(legacy_json).expect("Should deserialize legacy JSON");
+        assert!(!deserialized.copy_on_select);
+        assert!(deserialized.enable_osc52);
+        assert!(!deserialized.osc52_allow_query);
+
+        // Roundtrip with custom values
+        let custom = Profile {
+            copy_on_select: true,
+            enable_osc52: false,
+            osc52_allow_query: true,
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_string(&custom).expect("Serialization should succeed");
+        let roundtrip: Profile = serde_json::from_str(&serialized).expect("Deserialization should succeed");
+        assert!(roundtrip.copy_on_select);
+        assert!(!roundtrip.enable_osc52);
+        assert!(roundtrip.osc52_allow_query);
     }
 }

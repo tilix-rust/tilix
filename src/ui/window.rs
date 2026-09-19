@@ -1146,6 +1146,86 @@ impl TilixWindow {
             });
             self.window.add_action(&action);
         }
+
+        // Copy
+        {
+            let action = gio::SimpleAction::new("copy", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().copy_clipboard_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
+
+        // Copy as HTML
+        {
+            let action = gio::SimpleAction::new("copy-html", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().copy_html_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
+
+        // Paste
+        {
+            let action = gio::SimpleAction::new("paste", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().paste_clipboard_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
+
+        // Paste Primary Selection
+        {
+            let action = gio::SimpleAction::new("paste-primary", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().paste_primary_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
+
+        // Select All
+        {
+            let action = gio::SimpleAction::new("select-all", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().select_all_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
     }
 
     pub fn window(&self) -> &adw::ApplicationWindow {
