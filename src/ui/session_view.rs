@@ -2145,7 +2145,7 @@ mod tests {
             }
             let session = SessionView::with_model_and_dir(model, None);
             let window = gtk::Window::new();
-            window.set_default_size(400, 300);
+            window.set_default_size(1000, 600);
             window.set_child(Some(session.widget()));
             window.present();
 
@@ -2163,7 +2163,7 @@ mod tests {
             let expected_pos = if paned.width() > 0 {
                 (paned.width() as f64 * 0.7).round() as i32
             } else {
-                280
+                700
             };
             assert_eq!(paned.position(), expected_pos);
 
@@ -2191,9 +2191,9 @@ mod tests {
             let expected_root_pos = if root_paned.width() > 0 {
                 (root_paned.width() as f64 * 0.7).round() as i32
             } else {
-                280
+                700
             };
-            assert_eq!(root_paned.position(), expected_root_pos, "Root paned position must be 280 (70%), not reset/equalized");
+            assert_eq!(root_paned.position(), expected_root_pos, "Root paned position must be 70%, not reset/equalized");
 
             session.close();
         });
