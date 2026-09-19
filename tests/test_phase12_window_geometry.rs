@@ -258,7 +258,18 @@ fn test_phase12_tilix_window_instantiation_uses_calculated_size() {
         assert!(w >= MIN_WINDOW_WIDTH, "Window default width {} should be >= {}", w, MIN_WINDOW_WIDTH);
         assert!(h >= MIN_WINDOW_HEIGHT, "Window default height {} should be >= {}", h, MIN_WINDOW_HEIGHT);
 
-        // Also test new_with_profile
+        // Test with a smaller profile (40x15) to verify dynamic calculation without hitting monitor clamping
+        let small_profile = Profile {
+            default_size_columns: 40,
+            default_size_rows: 15,
+            ..Default::default()
+        };
+        let small_win = TilixWindow::new_with_profile(&app, &small_profile);
+        let (sw, sh) = small_win.window().default_size();
+        assert!(sw < w || w == MIN_WINDOW_WIDTH, "Small profile width {} should be < default {} (or at min)", sw, w);
+        assert!(sh < h || h == MIN_WINDOW_HEIGHT, "Small profile height {} should be < default {} (or at min)", sh, h);
+
+        // Also test new_with_profile for a larger profile (120x40), allowing clamping at monitor 90% bounds
         let custom_profile = Profile {
             default_size_columns: 120,
             default_size_rows: 40,
@@ -266,7 +277,7 @@ fn test_phase12_tilix_window_instantiation_uses_calculated_size() {
         };
         let profile_win = TilixWindow::new_with_profile(&app, &custom_profile);
         let (pw, ph) = profile_win.window().default_size();
-        assert!(pw > w, "Custom profile width {} should be greater than default {}", pw, w);
-        assert!(ph > h, "Custom profile height {} should be greater than default {}", ph, h);
+        assert!(pw >= w, "Custom profile width {} should be >= default {}", pw, w);
+        assert!(ph >= h, "Custom profile height {} should be >= default {}", ph, h);
     });
 }
