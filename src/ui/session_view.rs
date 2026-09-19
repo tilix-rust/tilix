@@ -2064,6 +2064,12 @@ mod tests {
             window.present();
 
             let ctx = glib::MainContext::default();
+            let paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
+            let start = std::time::Instant::now();
+            while (paned.width() == 0 || paned.position() <= 0) && start.elapsed() < std::time::Duration::from_millis(500) {
+                ctx.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             for _ in 0..10 {
                 ctx.iteration(false);
             }
@@ -2071,8 +2077,6 @@ mod tests {
             if let LayoutNode::Split { ratio, .. } = session.model.borrow().layout.root().unwrap() {
                 assert!((*ratio - 0.2).abs() < 0.01, "Initial ratio should be 0.2, got {}", ratio);
             }
-
-            let paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
             let controllers = paned.observe_controllers();
             let mut click_opt = None;
             for i in 0..controllers.n_items() {
@@ -2409,13 +2413,18 @@ mod tests {
             window.present();
 
             let ctx = glib::MainContext::default();
-            for _ in 0..30 {
-                ctx.iteration(false);
-            }
-
             // Find Paned 1 (A | B)
             let paned_1 = SessionView::find_paned_by_split_id(&session.container, SplitId(1))
                 .expect("Paned 1 must exist");
+
+            let start = std::time::Instant::now();
+            while (paned_1.width() == 0 || paned_1.position() <= 0) && start.elapsed() < std::time::Duration::from_millis(500) {
+                ctx.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
 
             // User manually adjusts A and B divider to position 150
             paned_1.set_position(150);
@@ -2463,11 +2472,15 @@ mod tests {
             window.present();
 
             let ctx = glib::MainContext::default();
+            let paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
+            let start = std::time::Instant::now();
+            while (paned.width() == 0 || paned.position() <= 0) && start.elapsed() < std::time::Duration::from_millis(500) {
+                ctx.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             for _ in 0..10 {
                 ctx.iteration(false);
             }
-
-            let paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
 
             // Find the native GtkGestureDrag controller attached to GtkPaned
             let controllers = paned.observe_controllers();
@@ -2557,6 +2570,13 @@ mod tests {
             let root_paned = SessionView::find_paned_by_split_id(&session.container, SplitId(1)).unwrap();
             let paned_2 = SessionView::find_paned_by_split_id(&session.container, SplitId(2)).unwrap();
             let paned_3 = SessionView::find_paned_by_split_id(&session.container, SplitId(3)).unwrap();
+
+            let start = std::time::Instant::now();
+            while (root_paned.width() == 0 || paned_4.width() == 0 || paned_4.position() <= 0) && start.elapsed() < std::time::Duration::from_millis(500) {
+                ctx.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            for _ in 0..10 { ctx.iteration(false); }
 
             // Adjust Paned 1 (A | B) to a custom ratio (e.g. 700px, ~58%)
             root_paned.set_position(700);
