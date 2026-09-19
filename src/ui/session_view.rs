@@ -977,6 +977,23 @@ impl SessionView {
         }
     }
 
+    fn is_point_on_paned_handle(p: &gtk::Paned, x: f64, y: f64) -> bool {
+        let pos = p.position() as f64;
+        let near_pos = match p.orientation() {
+            gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
+            gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
+            _ => false,
+        };
+        if let Some(w) = p.pick(x, y, gtk::PickFlags::DEFAULT) {
+            if w.css_name() == "separator" {
+                return w.parent().as_ref() == Some(p.upcast_ref());
+            }
+            near_pos
+        } else {
+            near_pos
+        }
+    }
+
     fn build_node(
         node: &LayoutNode,
         panes: &HashMap<PaneId, TerminalPane>,
@@ -1094,13 +1111,14 @@ impl SessionView {
                     }
                 });
 
-                // Locate GtkPaned's built-in drag gesture
+                // Locate GtkPaned's built-in pointer drag gesture (strictly GtkGestureDrag, excluding subclasses like GtkGesturePan)
                 let controllers = paned.observe_controllers();
                 let mut drag_opt = None;
                 for i in 0..controllers.n_items() {
                     if let Some(item) = controllers.item(i) {
-                        if let Some(drag) = item.downcast_ref::<gtk::GestureDrag>() {
-                            drag_opt = Some(drag.clone());
+                        if item.type_() == gtk::GestureDrag::static_type() {
+                            drag_opt = item.downcast::<gtk::GestureDrag>().ok();
+                            break;
                         }
                     }
                 }
@@ -1163,16 +1181,22 @@ impl SessionView {
                     just_eq_action.set(false);
                 });
 
-                let last_click_time = Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+                let last_click_drag = Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+                let last_click_click = Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
 
                 // 1. Connect to GtkPaned's native drag gesture (which GTK activates only on the separator)
                 if let Some(ref drag) = drag_opt {
                     let is_dragging_begin = Rc::clone(&is_dragging);
                     let is_dragging_end = Rc::clone(&is_dragging);
-                    let last_click = Rc::clone(&last_click_time);
+                    let last_click = Rc::clone(&last_click_drag);
                     let eq = Rc::clone(&equalize_action);
+                    let paned_for_begin = paned.downgrade();
 
-                    drag.connect_drag_begin(move |_gesture, _start_x, _start_y| {
+                    drag.connect_drag_begin(move |gesture, start_x, start_y| {
+                        let Some(p) = paned_for_begin.upgrade() else { return; };
+                        if !Self::is_point_on_paned_handle(&p, start_x, start_y) {
+                            return;
+                        }
                         is_dragging_begin.set(true);
                         let now = std::time::Instant::now();
                         let is_double = if let Some(prev) = last_click.get() {
@@ -1183,13 +1207,22 @@ impl SessionView {
                         last_click.set(Some(now));
                         if is_double {
                             last_click.set(None);
+                            gesture.set_state(gtk::EventSequenceState::Denied);
                             eq();
                         }
                     });
 
                     let model_for_drag = Rc::clone(model);
                     let paned_for_drag = paned.downgrade();
-                    drag.connect_drag_update(move |_gesture, _offset_x, _offset_y| {
+                    let last_click_update = Rc::clone(&last_click_drag);
+                    let is_dragging_update = Rc::clone(&is_dragging);
+                    drag.connect_drag_update(move |_gesture, offset_x, offset_y| {
+                        if !is_dragging_update.get() {
+                            return;
+                        }
+                        if offset_x.hypot(offset_y) > 3.0 {
+                            last_click_update.set(None);
+                        }
                         if let Some(p) = paned_for_drag.upgrade() {
                             let len = match p.orientation() {
                                 gtk::Orientation::Horizontal => p.width(),
@@ -1207,8 +1240,16 @@ impl SessionView {
 
                     let model_for_end = Rc::clone(model);
                     let paned_for_end = paned.downgrade();
-                    drag.connect_drag_end(move |_gesture, _offset_x, _offset_y| {
+                    let last_click_end = Rc::clone(&last_click_drag);
+                    let is_dragging_end_check = Rc::clone(&is_dragging);
+                    drag.connect_drag_end(move |_gesture, offset_x, offset_y| {
+                        if !is_dragging_end_check.get() {
+                            return;
+                        }
                         is_dragging_end.set(false);
+                        if offset_x.hypot(offset_y) > 3.0 {
+                            last_click_end.set(None);
+                        }
                         if let Some(p) = paned_for_end.upgrade() {
                             let len = match p.orientation() {
                                 gtk::Orientation::Horizontal => p.width(),
@@ -1225,10 +1266,11 @@ impl SessionView {
                     });
                 }
 
+                let is_dragging_notify = Rc::clone(&is_dragging);
                 let just_eq_notify = Rc::clone(&just_equalized);
                 let model_clone_notify = Rc::clone(model);
                 paned.connect_notify_local(Some("position"), move |p, _| {
-                    if just_eq_notify.get() {
+                    if just_eq_notify.get() || !is_dragging_notify.get() {
                         return;
                     }
                     let len = match p.orientation() {
@@ -1250,31 +1292,12 @@ impl SessionView {
                 click.set_propagation_phase(gtk::PropagationPhase::Capture);
                 paned.add_controller(click.clone());
                 {
-                    let last_click = Rc::clone(&last_click_time);
+                    let last_click = Rc::clone(&last_click_click);
                     let eq = Rc::clone(&equalize_action);
                     let paned_weak = paned_weak.clone();
                     click.connect_pressed(move |gesture, n_press, x, y| {
                         let Some(p) = paned_weak.upgrade() else { return; };
-                        let pos = p.position() as f64;
-                        let is_on_handle = if let Some(w) = p.pick(x, y, gtk::PickFlags::DEFAULT) {
-                            if w.css_name() == "separator" {
-                                w.parent().as_ref() == Some(p.upcast_ref())
-                            } else {
-                                match p.orientation() {
-                                    gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
-                                    gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
-                                    _ => false,
-                                }
-                            }
-                        } else {
-                            match p.orientation() {
-                                gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
-                                gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
-                                _ => false,
-                            }
-                        };
-
-                        if !is_on_handle {
+                        if !Self::is_point_on_paned_handle(&p, x, y) {
                             return;
                         }
 
@@ -1910,8 +1933,9 @@ mod tests {
             let mut drag_controller = None;
             for i in 0..controllers.n_items() {
                 if let Some(item) = controllers.item(i) {
-                    if let Some(drag) = item.downcast_ref::<gtk::GestureDrag>() {
-                        drag_controller = Some(drag.clone());
+                    if item.type_() == gtk::GestureDrag::static_type() {
+                        drag_controller = item.downcast::<gtk::GestureDrag>().ok();
+                        break;
                     }
                 }
             }
@@ -2104,7 +2128,7 @@ mod tests {
             window.present();
 
             let ctx = glib::MainContext::default();
-            for _ in 0..10 {
+            for _ in 0..30 {
                 ctx.iteration(false);
             }
 
@@ -2347,7 +2371,7 @@ mod tests {
             window.present();
 
             let ctx = glib::MainContext::default();
-            for _ in 0..10 {
+            for _ in 0..30 {
                 ctx.iteration(false);
             }
 
@@ -2387,6 +2411,212 @@ mod tests {
             session.close();
         });
     }
+
+    #[test]
+    fn test_drag_separator_then_double_click_equalizes() {
+        crate::ui::window::run_gtk_test(|| {
+            crate::ui::window::setup_css();
+            let mut model = SessionModel::new(PaneId(1));
+            model.split_pane(PaneId(1), SplitOrientation::Horizontal).unwrap();
+            let session = SessionView::with_model_and_dir(model, None);
+            let window = gtk::Window::new();
+            window.set_default_size(800, 600);
+            window.set_child(Some(session.widget()));
+            window.present();
+
+            let ctx = glib::MainContext::default();
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
+
+            let paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
+
+            // Find the native GtkGestureDrag controller attached to GtkPaned
+            let controllers = paned.observe_controllers();
+            let mut native_drag: Option<gtk::GestureDrag> = None;
+            for i in 0..controllers.n_items() {
+                if let Some(item) = controllers.item(i) {
+                    if item.type_() == gtk::GestureDrag::static_type() {
+                        native_drag = item.downcast::<gtk::GestureDrag>().ok();
+                        break;
+                    }
+                }
+            }
+            let drag = native_drag.expect("GtkPaned must have native GtkGestureDrag controller");
+
+            // 1. Drag the separator to 200px (from default ~400px)
+            use glib::prelude::*;
+            let initial_pos = paned.position() as f64;
+            drag.emit_by_name::<()>("drag-begin", &[&initial_pos, &100.0f64]);
+            paned.set_position(200);
+            drag.emit_by_name::<()>("drag-update", &[&-200.0f64, &0.0f64]);
+            drag.emit_by_name::<()>("drag-end", &[&-200.0f64, &0.0f64]);
+
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
+
+            // Ratio should now reflect the dragged position (200 / 640 = ~0.31)
+            if let LayoutNode::Split { ratio, .. } = session.model.borrow().layout.root().unwrap() {
+                assert!((*ratio - 0.5).abs() > 0.1, "Ratio after drag should be different from 0.5, got {}", ratio);
+            }
+
+            // 2. Double click the separator at its new position via the native drag gesture
+            let cur_pos = paned.position() as f64;
+            // First click
+            drag.emit_by_name::<()>("drag-begin", &[&cur_pos, &100.0f64]);
+            drag.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+
+            // Delay 60ms (well within double-click window [40ms, 450ms])
+            std::thread::sleep(std::time::Duration::from_millis(60));
+
+            // Second click
+            drag.emit_by_name::<()>("drag-begin", &[&cur_pos, &100.0f64]);
+            drag.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+
+            for _ in 0..10 {
+                ctx.iteration(false);
+            }
+
+            // Ratio must be equalized back to 0.5
+            if let LayoutNode::Split { ratio, .. } = session.model.borrow().layout.root().unwrap() {
+                assert!((*ratio - 0.5).abs() < 0.01, "Ratio after double click must be equalized to 0.5, got {}", ratio);
+            }
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_user_reproduction_equalize_cluster() {
+        crate::ui::window::run_gtk_test(|| {
+            crate::ui::window::setup_css();
+            let model = SessionModel::new(PaneId(1));
+            let session = SessionView::with_model_and_dir(model, None);
+            let window = gtk::Window::new();
+            window.set_default_size(1200, 800);
+            window.set_child(Some(session.widget()));
+            window.present();
+
+            let ctx = glib::MainContext::default();
+            for _ in 0..30 {
+                ctx.iteration(false);
+            }
+
+            session.split_active(SplitOrientation::Horizontal);
+            for _ in 0..30 { ctx.iteration(false); }
+
+            session.split_active(SplitOrientation::Horizontal);
+            for _ in 0..30 { ctx.iteration(false); }
+
+            session.split_active(SplitOrientation::Vertical);
+            for _ in 0..30 { ctx.iteration(false); }
+
+            session.split_active(SplitOrientation::Vertical);
+            for _ in 0..30 { ctx.iteration(false); }
+
+            let paned_4 = SessionView::find_paned_by_split_id(&session.container, SplitId(4)).expect("paned 4 must exist");
+            let root_paned = SessionView::find_paned_by_split_id(&session.container, SplitId(1)).unwrap();
+            let paned_2 = SessionView::find_paned_by_split_id(&session.container, SplitId(2)).unwrap();
+            let paned_3 = SessionView::find_paned_by_split_id(&session.container, SplitId(3)).unwrap();
+
+            // Adjust Paned 1 (A | B) to a custom ratio (e.g. 700px, ~58%)
+            root_paned.set_position(700);
+            for _ in 0..10 { ctx.iteration(false); }
+
+            // Find controllers for all paneds
+            let get_drag = |p: &gtk::Paned| -> gtk::GestureDrag {
+                let ctrls = p.observe_controllers();
+                for i in 0..ctrls.n_items() {
+                    if let Some(item) = ctrls.item(i) {
+                        if item.type_() == gtk::GestureDrag::static_type() {
+                            return item.downcast::<gtk::GestureDrag>().unwrap();
+                        }
+                    }
+                }
+                panic!("Paned missing GestureDrag");
+            };
+
+            let drag_1 = get_drag(&root_paned);
+            let drag_2 = get_drag(&paned_2);
+            let drag_3 = get_drag(&paned_3);
+            let drag_4 = get_drag(&paned_4);
+
+            use glib::prelude::*;
+            // Simulate GTK4 event dispatch hierarchy for a double click at Paned 4's separator
+            // Window coords: x ~ 950, y = 600
+            // First click
+            drag_1.emit_by_name::<()>("drag-begin", &[&950.0f64, &600.0f64]);
+            drag_2.emit_by_name::<()>("drag-begin", &[&350.0f64, &600.0f64]);
+            drag_3.emit_by_name::<()>("drag-begin", &[&50.0f64, &600.0f64]);
+            drag_4.emit_by_name::<()>("drag-begin", &[&50.0f64, &(paned_4.position() as f64)]);
+
+            drag_1.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+            drag_2.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+            drag_3.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+            drag_4.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+
+            std::thread::sleep(std::time::Duration::from_millis(60));
+
+            // Second click (double-click)
+            drag_1.emit_by_name::<()>("drag-begin", &[&950.0f64, &600.0f64]);
+            drag_2.emit_by_name::<()>("drag-begin", &[&350.0f64, &600.0f64]);
+            drag_3.emit_by_name::<()>("drag-begin", &[&50.0f64, &600.0f64]);
+            drag_4.emit_by_name::<()>("drag-begin", &[&50.0f64, &(paned_4.position() as f64)]);
+
+            drag_1.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+            drag_2.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+            drag_3.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+            drag_4.emit_by_name::<()>("drag-end", &[&0.0f64, &0.0f64]);
+
+            for _ in 0..30 {
+                ctx.iteration(false);
+            }
+
+            let (initial_r1, initial_r2) = {
+                let m = session.model.borrow();
+                let r = m.layout.root().unwrap();
+                if let LayoutNode::Split { ratio: r1, second, .. } = r {
+                    if let LayoutNode::Split { ratio: r2, .. } = &**second {
+                        (*r1, *r2)
+                    } else {
+                        panic!("Split 2 missing");
+                    }
+                } else {
+                    panic!("Split 1 missing");
+                }
+            };
+
+            // In the model, Split 1 and Split 2 must have their previous ratios preserved
+            let m = session.model.borrow();
+            if let Some(LayoutNode::Split { id: s1_id, ratio: r1, second, .. }) = m.layout.root() {
+                assert_eq!(*s1_id, SplitId(1));
+                assert!((*r1 - initial_r1).abs() < 1e-6, "Split 1 ratio must be preserved! Got {}", r1);
+                if let LayoutNode::Split { id: s2_id, ratio: r2, second: s3, .. } = &**second {
+                    assert_eq!(*s2_id, SplitId(2));
+                    assert!((*r2 - initial_r2).abs() < 1e-6, "Split 2 ratio must be preserved! Got {}", r2);
+                    // And the right vertical cluster (Split 3 and 4) MUST BE EQUALIZED!
+                    if let LayoutNode::Split { id: s3_id, ratio: r3, second: s4, .. } = &**s3 {
+                        assert_eq!(*s3_id, SplitId(3));
+                        assert!((*r3 - (1.0 / 3.0)).abs() < 0.02, "Split 3 must be 1/3, got {}", r3);
+                        if let LayoutNode::Split { id: s4_id, ratio: r4, .. } = &**s4 {
+                            assert_eq!(*s4_id, SplitId(4));
+                            assert!((*r4 - 0.5).abs() < 0.02, "Split 4 must be 1/2, got {}", r4);
+                        } else {
+                            panic!("Expected Split 4");
+                        }
+                    } else {
+                        panic!("Expected Split 3");
+                    }
+                } else {
+                    panic!("Expected Split 2");
+                }
+            }
+
+            session.close();
+        });
+    }
 }
+
 
 
