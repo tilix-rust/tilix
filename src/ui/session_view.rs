@@ -2146,17 +2146,33 @@ mod tests {
             window.present();
 
             let ctx = glib::MainContext::default();
-            for _ in 0..30 {
+            let paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
+            let start = std::time::Instant::now();
+            while (paned.width() == 0 || paned.position() <= 0) && start.elapsed() < std::time::Duration::from_millis(500) {
+                ctx.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            for _ in 0..10 {
                 ctx.iteration(false);
             }
 
-            let paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
-            assert_eq!(paned.position(), 280);
+            let expected_pos = if paned.width() > 0 {
+                (paned.width() as f64 * 0.7).round() as i32
+            } else {
+                280
+            };
+            assert_eq!(paned.position(), expected_pos);
 
             // Split Pane 2 vertically
             session.split_pane(PaneId(2), SplitOrientation::Vertical);
             window.present();
 
+            let root_paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
+            let start = std::time::Instant::now();
+            while (root_paned.width() == 0 || root_paned.position() <= 0) && start.elapsed() < std::time::Duration::from_millis(500) {
+                ctx.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             for _ in 0..10 {
                 ctx.iteration(false);
             }
@@ -2168,8 +2184,12 @@ mod tests {
                 panic!("Root should be Split");
             }
 
-            let root_paned = session.container.first_child().unwrap().downcast::<gtk::Paned>().unwrap();
-            assert_eq!(root_paned.position(), 280, "Root paned position must be 280 (70%), not reset/equalized");
+            let expected_root_pos = if root_paned.width() > 0 {
+                (root_paned.width() as f64 * 0.7).round() as i32
+            } else {
+                280
+            };
+            assert_eq!(root_paned.position(), expected_root_pos, "Root paned position must be 280 (70%), not reset/equalized");
 
             session.close();
         });
