@@ -2408,7 +2408,7 @@ mod tests {
 
             let session = SessionView::with_model_and_dir(model, None);
             let window = gtk::Window::new();
-            window.set_default_size(800, 600);
+            window.set_default_size(1000, 600);
             window.set_child(Some(session.widget()));
             window.present();
 
@@ -2426,15 +2426,15 @@ mod tests {
                 ctx.iteration(false);
             }
 
-            // User manually adjusts A and B divider to position 150
-            paned_1.set_position(150);
+            // User manually adjusts A and B divider to position 250 (> minimum pane width of 192)
+            paned_1.set_position(250);
 
-            for _ in 0..5 {
+            for _ in 0..10 {
                 ctx.iteration(false);
             }
 
-            // Paned 1 position is now 150
-            assert_eq!(paned_1.position(), 150);
+            let custom_pos = paned_1.position();
+            assert!(custom_pos >= 200, "Paned 1 position should be at custom position >= 200, got {}", custom_pos);
 
             // Now double-click or equalize SplitId(4) (D | E)
             session.equalize_split(SplitId(4));
@@ -2443,8 +2443,8 @@ mod tests {
                 ctx.iteration(false);
             }
 
-            // Paned 1 position MUST STILL BE 150, NOT RESET!
-            assert_eq!(paned_1.position(), 150, "Paned 1 position must not be reset after equalizing D and E");
+            // Paned 1 position MUST STILL BE custom_pos, NOT RESET!
+            assert_eq!(paned_1.position(), custom_pos, "Paned 1 position must not be reset after equalizing D and E");
 
             // Paned 4 (D | E) should be equalized (50%)
             let paned_4 = SessionView::find_paned_by_split_id(&session.container, SplitId(4))

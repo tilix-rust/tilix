@@ -960,6 +960,8 @@ impl TerminalPane {
 
                             unsafe {
                                 cmd.pre_exec(move || {
+                                    #[cfg(target_os = "linux")]
+                                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                                     libc::setsid();
                                     libc::ioctl(0, libc::TIOCSCTTY, 1);
                                     Ok(())
@@ -1703,6 +1705,21 @@ impl TerminalPane {
         self.bell_callbacks.borrow_mut().clear();
         self.child_exit_callbacks.borrow_mut().clear();
         self.dock_callback.borrow_mut().take();
+    }
+}
+
+impl Drop for TerminalPane {
+    fn drop(&mut self) {
+        if let Some(pid) = self.child_pid.get() {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG);
+            }
+        }
+        if let Some(proxy) = self.pty_proxy.borrow_mut().take() {
+            proxy.shutdown();
+        }
     }
 }
 
