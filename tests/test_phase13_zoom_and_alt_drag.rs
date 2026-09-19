@@ -297,3 +297,56 @@ fn test_phase13_dnd_drag_source_modifier_gating() {
         assert!(h_found_drag, "DragSource must be attached to widget without require_alt");
     });
 }
+
+#[test]
+fn test_phase13_dnd_active_drag_lifecycle_preserves_running_pane() {
+    run_gtk_test(|| {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("Failed to spawn sleep");
+        let pid = child.id() as i32;
+
+        let session = SessionView::new();
+        let p1 = session.active_pane_id().expect("p1 must exist");
+        let panes = session.panes();
+        let pane1 = panes.borrow().get(&p1).cloned().expect("pane1 must exist");
+        pane1.set_child_pid_for_test(Some(pid));
+
+        // Start active pane drag
+        let active = ui::dnd::ActivePaneDrag {
+            pane_id: p1,
+            source_session_widget: glib::WeakRef::new(),
+        };
+        ui::dnd::set_active_pane_drag(Some(active));
+
+        // Retrieve active pane drag during mouse motion simulation
+        let drag_opt = ui::dnd::get_active_pane_drag();
+        assert!(drag_opt.is_some());
+        assert_eq!(drag_opt.unwrap().pane_id, p1);
+
+        // Clear active pane drag (e.g. drop or drag cancelled)
+        ui::dnd::clear_active_pane_drag();
+        assert!(ui::dnd::get_active_pane_drag().is_none());
+
+        // Child process must still be alive!
+        assert!(child.try_wait().unwrap().is_none(), "Process must remain alive after drag end");
+
+        // Pane must NOT be closed!
+        assert_eq!(session.pane_count(), 1, "Pane must still be part of session");
+        assert_eq!(session.active_pane_id(), Some(p1));
+
+        // Explicit close properly terminates process
+        session.close();
+        let mut exited = false;
+        for _ in 0..50 {
+            if let Ok(Some(_)) = child.try_wait() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(exited, "Process must terminate on session.close()");
+    });
+}
+

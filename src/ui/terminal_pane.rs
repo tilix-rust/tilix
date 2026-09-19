@@ -41,6 +41,42 @@ struct PaneWidgets {
     raw_title: Rc<RefCell<String>>,
 }
 
+pub struct ChildProcessGuard {
+    child_pid: Rc<Cell<Option<i32>>>,
+    pty_proxy: Rc<RefCell<Option<std::sync::Arc<crate::pty::PtyProxy>>>>,
+}
+
+impl ChildProcessGuard {
+    pub fn new(
+        child_pid: Rc<Cell<Option<i32>>>,
+        pty_proxy: Rc<RefCell<Option<std::sync::Arc<crate::pty::PtyProxy>>>>,
+    ) -> Self {
+        Self {
+            child_pid,
+            pty_proxy,
+        }
+    }
+
+    pub fn terminate(&self) {
+        if let Some(pid) = self.child_pid.take() {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG);
+            }
+        }
+        if let Some(proxy) = self.pty_proxy.borrow_mut().take() {
+            proxy.shutdown();
+        }
+    }
+}
+
+impl Drop for ChildProcessGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
 #[derive(Clone)]
 pub struct TerminalPane {
     overlay: gtk::Overlay,
@@ -63,6 +99,7 @@ pub struct TerminalPane {
     current_directory: Rc<RefCell<Option<PathBuf>>>,
     current_profile: Rc<RefCell<Profile>>,
     pty_proxy: Rc<RefCell<Option<std::sync::Arc<crate::pty::PtyProxy>>>>,
+    process_guard: Rc<ChildProcessGuard>,
     is_sync_enabled: Rc<Cell<bool>>,
     is_closing: Rc<Cell<bool>>,
     close_callbacks: Rc<RefCell<Vec<CloseCallback>>>,
@@ -248,6 +285,10 @@ impl TerminalPane {
 
         let child_pid: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
         let pty_proxy: Rc<RefCell<Option<std::sync::Arc<PtyProxy>>>> = Rc::new(RefCell::new(None));
+        let process_guard = Rc::new(ChildProcessGuard::new(
+            Rc::clone(&child_pid),
+            Rc::clone(&pty_proxy),
+        ));
         let is_sync_enabled = Rc::new(Cell::new(true));
         let is_closing = Rc::new(Cell::new(false));
         let close_callbacks: Rc<RefCell<Vec<CloseCallback>>> = Rc::new(RefCell::new(Vec::new()));
@@ -690,6 +731,7 @@ impl TerminalPane {
             current_directory,
             current_profile,
             pty_proxy,
+            process_guard,
             is_sync_enabled,
             is_closing,
             close_callbacks,
@@ -1116,6 +1158,7 @@ impl TerminalPane {
 
     pub fn close(&self) {
         self.is_closing.set(true);
+        self.process_guard.terminate();
     }
 
     pub fn widget(&self) -> &gtk::Widget {
@@ -1706,20 +1749,10 @@ impl TerminalPane {
         self.child_exit_callbacks.borrow_mut().clear();
         self.dock_callback.borrow_mut().take();
     }
-}
 
-impl Drop for TerminalPane {
-    fn drop(&mut self) {
-        if let Some(pid) = self.child_pid.get() {
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-                libc::kill(pid, libc::SIGKILL);
-                libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG);
-            }
-        }
-        if let Some(proxy) = self.pty_proxy.borrow_mut().take() {
-            proxy.shutdown();
-        }
+    #[cfg(test)]
+    pub fn set_child_pid_for_test(&self, pid: Option<i32>) {
+        self.child_pid.set(pid);
     }
 }
 
@@ -1893,6 +1926,80 @@ mod tests {
                 pane.zoom_in();
             }
             assert_eq!(pane.font_scale(), ZOOM_MAX);
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_clone_drop_preserves_child_process() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(1), None);
+            let mut child = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("Failed to spawn sleep");
+            let pid = child.id() as i32;
+            pane.set_child_pid_for_test(Some(pid));
+
+            // Verify process is alive
+            unsafe {
+                assert_eq!(libc::kill(pid, 0), 0, "Process must be alive initially");
+            }
+
+            // Clone the pane and drop the clone
+            let clone = pane.clone();
+            drop(clone);
+
+            // Verify process is STILL alive after dropping clone
+            unsafe {
+                assert_eq!(libc::kill(pid, 0), 0, "Process must still be alive after dropping clone");
+            }
+
+            // Explicitly close the pane
+            pane.close();
+
+            // Verify process was terminated upon close()
+            let mut exited = false;
+            for _ in 0..50 {
+                if let Ok(Some(_status)) = child.try_wait() {
+                    exited = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(exited, "Process must be terminated after pane.close()");
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_last_drop_terminates_child_process() {
+        crate::ui::window::run_gtk_test(|| {
+            let mut child = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("Failed to spawn sleep");
+            let pid = child.id() as i32;
+
+            let pane = TerminalPane::new(PaneId(2), None);
+            pane.set_child_pid_for_test(Some(pid));
+
+            let clone1 = pane.clone();
+            let clone2 = pane.clone();
+            drop(clone1);
+            assert!(child.try_wait().unwrap().is_none(), "Process alive after clone1 drop");
+            drop(clone2);
+            assert!(child.try_wait().unwrap().is_none(), "Process alive after clone2 drop");
+
+            drop(pane);
+            // Now all TerminalPane references are dropped, process must be dead
+            let mut exited = false;
+            for _ in 0..50 {
+                if let Ok(Some(_status)) = child.try_wait() {
+                    exited = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(exited, "Process must be dead after last pane drop");
         });
     }
 }

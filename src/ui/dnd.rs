@@ -11,7 +11,6 @@ use crate::ui::terminal_pane::TerminalPane;
 pub struct ActivePaneDrag {
     pub pane_id: PaneId,
     pub source_session_widget: glib::WeakRef<gtk::Widget>,
-    pub pane: TerminalPane,
 }
 
 thread_local! {
@@ -43,7 +42,6 @@ pub fn setup_pane_drag_source(
     drag_source.set_actions(gtk::gdk::DragAction::MOVE);
     let pane_id = pane.pane_id();
     let id_val = pane_id.0;
-    let pane_clone = pane.clone();
 
     if require_alt {
         drag_source.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -96,7 +94,6 @@ pub fn setup_pane_drag_source(
         let active = ActivePaneDrag {
             pane_id,
             source_session_widget: session_widget,
-            pane: pane_clone.clone(),
         };
         set_active_pane_drag(Some(active));
 
