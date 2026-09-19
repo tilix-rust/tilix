@@ -58,6 +58,8 @@ pub struct AppConfig {
     pub default_session_name: String,
     #[serde(default = "default_app_title_default")]
     pub app_title: String,
+    #[serde(default)]
+    pub compact_mode: bool,
 }
 
 impl Default for AppConfig {
@@ -82,6 +84,7 @@ impl Default for AppConfig {
             keybindings: KeybindingsConfig::default(),
             default_session_name: default_session_name_default(),
             app_title: default_app_title_default(),
+            compact_mode: false,
         }
     }
 }
@@ -644,6 +647,36 @@ mod tests {
         let legacy = AppConfig::from_json(legacy_json).expect("deserialize legacy json");
         assert_eq!(legacy.default_session_name, "${title}");
         assert_eq!(legacy.app_title, "${appName}: ${sessionName}");
+    }
+
+    #[test]
+    fn test_app_config_compact_mode_default() {
+        let config = AppConfig::default();
+        assert!(!config.compact_mode, "Default compact_mode must be false");
+    }
+
+    #[test]
+    fn test_app_config_compact_mode_serde_roundtrip() {
+        let mut config = AppConfig::default();
+        config.compact_mode = true;
+        let json_true = config.to_json().expect("serialize compact_mode true");
+        let loaded_true = AppConfig::from_json(&json_true).expect("deserialize compact_mode true");
+        assert!(loaded_true.compact_mode);
+
+        config.compact_mode = false;
+        let json_false = config.to_json().expect("serialize compact_mode false");
+        let loaded_false = AppConfig::from_json(&json_false).expect("deserialize compact_mode false");
+        assert!(!loaded_false.compact_mode);
+    }
+
+    #[test]
+    fn test_app_config_compact_mode_backwards_compatibility() {
+        let legacy_json = r#"{
+            "notifications_enabled": true,
+            "window_style": "normal"
+        }"#;
+        let config = AppConfig::from_json(legacy_json).expect("deserialize legacy json missing compact_mode");
+        assert!(!config.compact_mode, "Missing compact_mode field should default to false");
     }
 }
 

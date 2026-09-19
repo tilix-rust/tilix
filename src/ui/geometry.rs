@@ -16,6 +16,9 @@ pub const DEFAULT_SCROLLBAR_WIDTH: i32 = 16;
 pub const DEFAULT_HEADER_BAR_HEIGHT: i32 = 46;
 pub const DEFAULT_TAB_BAR_HEIGHT: i32 = 38;
 pub const DEFAULT_PANE_HEADER_HEIGHT: i32 = 36;
+pub const COMPACT_HEADER_BAR_HEIGHT: i32 = 28;
+pub const COMPACT_TAB_BAR_HEIGHT: i32 = 22;
+pub const COMPACT_PANE_HEADER_HEIGHT: i32 = 22;
 pub const MAX_MONITOR_RATIO: f64 = 0.90;
 
 /// Measures the character cell dimensions for the given profile using a headless VTE terminal instance.
@@ -65,22 +68,28 @@ pub fn calculate_window_size_from_cell_size(
             };
             let margin_w = (profile.draw_margin as i32) * 2;
 
+            let (header_bar_base, tab_bar_base, pane_header_base) = if app_config.compact_mode {
+                (COMPACT_HEADER_BAR_HEIGHT, COMPACT_TAB_BAR_HEIGHT, COMPACT_PANE_HEADER_HEIGHT)
+            } else {
+                (DEFAULT_HEADER_BAR_HEIGHT, DEFAULT_TAB_BAR_HEIGHT, DEFAULT_PANE_HEADER_HEIGHT)
+            };
+
             let pane_header_h = if app_config.pane_title_style != PaneTitleStyle::None
                 && app_config.pane_title_show_when_single
             {
-                DEFAULT_PANE_HEADER_HEIGHT
+                pane_header_base
             } else {
                 0
             };
 
             let header_bar_h = if app_config.window_style != WindowStyle::HideToolbar {
-                DEFAULT_HEADER_BAR_HEIGHT
+                header_bar_base
             } else {
                 0
             };
 
             let tab_bar_h = if app_config.show_tab_bar {
-                DEFAULT_TAB_BAR_HEIGHT
+                tab_bar_base
             } else {
                 0
             };
@@ -138,4 +147,64 @@ pub fn calculate_window_size_for_profile(
         (geom.width(), geom.height())
     });
     calculate_window_size_with_bounds(profile, app_config, monitor_size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compact_geometry_constants() {
+        assert_eq!(COMPACT_HEADER_BAR_HEIGHT, 28);
+        assert_eq!(COMPACT_TAB_BAR_HEIGHT, 22);
+        assert_eq!(COMPACT_PANE_HEADER_HEIGHT, 22);
+    }
+
+    #[test]
+    fn test_calculate_window_size_compact_mode_delta() {
+        let profile = Profile::default();
+        let normal_cfg = AppConfig {
+            compact_mode: false,
+            ..Default::default()
+        };
+
+        let compact_cfg = AppConfig {
+            compact_mode: true,
+            ..Default::default()
+        };
+
+        let cell_size = Some((9, 20));
+        let (nw, nh) = calculate_window_size_from_cell_size(&profile, &normal_cfg, cell_size, None);
+        let (cw, ch) = calculate_window_size_from_cell_size(&profile, &compact_cfg, cell_size, None);
+
+        // Width unchanged
+        assert_eq!(nw, cw);
+        assert_eq!(nw, 80 * 9 + 16);
+
+        // Height delta: (46 - 28) + (38 - 22) + (36 - 22) = 18 + 16 + 14 = 48px
+        assert_eq!(nh - ch, 48);
+        assert_eq!(nh, 24 * 20 + 36 + 46 + 38); // 600
+        assert_eq!(ch, 24 * 20 + 22 + 28 + 22); // 552
+    }
+
+    #[test]
+    fn test_calculate_window_size_compact_mode_hidden_chrome() {
+        let profile = Profile::default();
+        let mut normal_cfg = AppConfig::default();
+        normal_cfg.window_style = WindowStyle::HideToolbar;
+        normal_cfg.show_tab_bar = false;
+        normal_cfg.pane_title_style = PaneTitleStyle::None;
+        normal_cfg.compact_mode = false;
+
+        let mut compact_cfg = normal_cfg.clone();
+        compact_cfg.compact_mode = true;
+
+        let cell_size = Some((9, 20));
+        let (nw, nh) = calculate_window_size_from_cell_size(&profile, &normal_cfg, cell_size, None);
+        let (cw, ch) = calculate_window_size_from_cell_size(&profile, &compact_cfg, cell_size, None);
+
+        assert_eq!((nw, nh), (cw, ch));
+        assert_eq!(nw, 736);
+        assert_eq!(nh, 480);
+    }
 }

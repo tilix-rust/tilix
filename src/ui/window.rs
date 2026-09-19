@@ -26,6 +26,7 @@ thread_local! {
     static SESSION_TO_TAB: RefCell<HashMap<gtk::Widget, TabReference>> = RefCell::new(HashMap::new());
     static WINDOW_HEADER_BARS: RefCell<Vec<glib::WeakRef<adw::HeaderBar>>> = const { RefCell::new(Vec::new()) };
     static WINDOW_TAB_BARS: RefCell<Vec<glib::WeakRef<adw::TabBar>>> = const { RefCell::new(Vec::new()) };
+    static WINDOW_INSTANCES: RefCell<Vec<glib::WeakRef<adw::ApplicationWindow>>> = const { RefCell::new(Vec::new()) };
     static WINDOW_TITLE_UPDATERS: RefCell<Vec<WindowTitleUpdater>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -145,6 +146,57 @@ pub fn apply_show_tab_bar_to_all_windows(show: bool) {
         bars.borrow_mut().retain(|bar_weak| {
             if let Some(bar) = bar_weak.upgrade() {
                 bar.set_visible(show);
+                true
+            } else {
+                false
+            }
+        });
+    });
+}
+
+pub fn register_window_instance(window: &adw::ApplicationWindow) {
+    WINDOW_INSTANCES.with(|wins| wins.borrow_mut().push(window.downgrade()));
+}
+
+pub fn apply_compact_mode_to_all_windows(compact: bool) {
+    WINDOW_INSTANCES.with(|wins| {
+        wins.borrow_mut().retain(|win_weak| {
+            if let Some(win) = win_weak.upgrade() {
+                if compact {
+                    win.add_css_class("compact");
+                } else {
+                    win.remove_css_class("compact");
+                }
+                true
+            } else {
+                false
+            }
+        });
+    });
+
+    WINDOW_HEADER_BARS.with(|bars| {
+        bars.borrow_mut().retain(|bar_weak| {
+            if let Some(bar) = bar_weak.upgrade() {
+                if compact {
+                    bar.add_css_class("compact");
+                } else {
+                    bar.remove_css_class("compact");
+                }
+                true
+            } else {
+                false
+            }
+        });
+    });
+
+    WINDOW_TAB_BARS.with(|bars| {
+        bars.borrow_mut().retain(|bar_weak| {
+            if let Some(bar) = bar_weak.upgrade() {
+                if compact {
+                    bar.add_css_class("compact");
+                } else {
+                    bar.remove_css_class("compact");
+                }
                 true
             } else {
                 false
@@ -312,6 +364,154 @@ pub fn setup_css() {
             min-width: 1px;
             margin-left: 640px;
         }
+
+        /* Compact Mode Density Overrides */
+        /* 1. Eliminate 3px gap between toolbarview top-bar and terminal content */
+        window.compact toolbarview > .top-bar,
+        window.compact toolbarview > .top-bar .collapse-spacing,
+        .compact toolbarview > .top-bar,
+        .compact toolbarview > .top-bar .collapse-spacing {
+            padding-top: 0;
+            padding-bottom: 0;
+        }
+
+        /* 2. Compact HeaderBar & WindowTitle */
+        window.compact toolbarview > .top-bar .collapse-spacing headerbar,
+        window.compact headerbar,
+        .compact headerbar,
+        headerbar.compact {
+            min-height: 28px;
+            padding-top: 0;
+            padding-bottom: 0;
+        }
+        window.compact headerbar > windowhandle > box,
+        .compact headerbar > windowhandle > box {
+            padding-top: 0;
+            padding-bottom: 0;
+        }
+        window.compact windowtitle,
+        .compact windowtitle {
+            min-height: 20px;
+            padding: 0;
+        }
+        window.compact windowtitle .title,
+        .compact windowtitle .title {
+            font-size: 13px;
+            line-height: 14px;
+        }
+        window.compact headerbar button,
+        window.compact headerbar menubutton,
+        window.compact headerbar menubutton > button,
+        .compact headerbar button,
+        .compact headerbar menubutton,
+        .compact headerbar menubutton > button {
+            min-height: 24px;
+            min-width: 24px;
+            padding: 0;
+            margin-top: 2px;
+            margin-bottom: 2px;
+            margin-left: 1px;
+            margin-right: 1px;
+            border-radius: 3px;
+        }
+        window.compact headerbar button image,
+        .compact headerbar button image {
+            -gtk-icon-size: 13px;
+            opacity: 0.82;
+            transition: opacity 150ms ease-in-out;
+        }
+        window.compact headerbar button:hover image,
+        .compact headerbar button:hover image {
+            opacity: 1.0;
+        }
+        window.compact headerbar windowcontrols button,
+        .compact headerbar windowcontrols button {
+            min-height: 20px;
+            min-width: 20px;
+            padding: 1px;
+            margin-top: 0;
+            margin-bottom: 0;
+            border-radius: 3px;
+        }
+        window.compact headerbar windowcontrols button image,
+        .compact headerbar windowcontrols button image {
+            -gtk-icon-size: 12px;
+            opacity: 0.82;
+            transition: opacity 150ms ease-in-out;
+        }
+        window.compact headerbar windowcontrols button:hover image,
+        .compact headerbar windowcontrols button:hover image {
+            opacity: 1.0;
+        }
+
+        /* 3. Compact TabBar & TabBox */
+        window.compact toolbarview > .top-bar .collapse-spacing tabbar tabbox,
+        window.compact tabbar tabbox,
+        .compact tabbar tabbox {
+            min-height: 22px;
+            padding-top: 0;
+            padding-bottom: 0;
+        }
+        window.compact tabbar,
+        window.compact tabbar .box,
+        .compact tabbar,
+        .compact tabbar .box {
+            min-height: 22px;
+            margin-bottom: 0;
+            padding-top: 0;
+            padding-bottom: 0;
+            box-shadow: none;
+        }
+        window.compact tabbar tab,
+        window.compact tabbar tabbox > tabboxchild,
+        .compact tabbar tab,
+        .compact tabbar tabbox > tabboxchild {
+            min-height: 20px;
+            padding: 0 6px;
+            border-radius: 0;
+        }
+        window.compact tabbar tab button.image-button,
+        window.compact tabbar tab button.image-button:hover,
+        .compact tabbar tab button.image-button,
+        .compact tabbar tab button.image-button:hover {
+            min-width: 18px;
+            min-height: 18px;
+            padding: 0;
+            border-radius: 9999px;
+        }
+        window.compact tabbar tab button.image-button image,
+        .compact tabbar tab button.image-button image {
+            -gtk-icon-size: 16px;
+        }
+
+        /* 4. Compact TerminalPane Header */
+        window.compact .terminal-pane-header,
+        .compact .terminal-pane-header,
+        .terminal-pane-header.compact {
+            padding: 0 4px;
+            min-height: 22px;
+        }
+        window.compact .terminal-pane-header button,
+        .compact .terminal-pane-header button {
+            min-height: 18px;
+            min-width: 18px;
+            padding: 0 1px;
+            border-radius: 3px;
+        }
+        window.compact .terminal-pane-header button image,
+        .compact .terminal-pane-header button image {
+            -gtk-icon-size: 12px;
+            opacity: 0.82;
+            transition: opacity 150ms ease-in-out;
+        }
+        window.compact .terminal-pane-header button:hover image,
+        .compact .terminal-pane-header button:hover image {
+            opacity: 1.0;
+        }
+        window.compact .terminal-pane-header label,
+        .compact .terminal-pane-header label {
+            font-size: 0.85em;
+        }
         ",
     );
     if let Some(display) = gtk::gdk::Display::default() {
@@ -381,18 +581,21 @@ impl TilixWindow {
         new_tab_btn.set_tooltip_text(Some("New Tab (Ctrl+Shift+T)"));
         new_tab_btn.set_action_name(Some("win.new-tab"));
         new_tab_btn.add_css_class("flat");
+        new_tab_btn.set_valign(gtk::Align::Center);
         header_bar.pack_start(&new_tab_btn);
 
         let split_h_btn = gtk::Button::from_icon_name("object-flip-horizontal-symbolic");
         split_h_btn.set_tooltip_text(Some("Split Right (Ctrl+Shift+R)"));
         split_h_btn.set_action_name(Some("win.split-right"));
         split_h_btn.add_css_class("flat");
+        split_h_btn.set_valign(gtk::Align::Center);
         header_bar.pack_start(&split_h_btn);
 
         let split_v_btn = gtk::Button::from_icon_name("object-flip-vertical-symbolic");
         split_v_btn.set_tooltip_text(Some("Split Down (Ctrl+Shift+D)"));
         split_v_btn.set_action_name(Some("win.split-down"));
         split_v_btn.add_css_class("flat");
+        split_v_btn.set_valign(gtk::Align::Center);
         header_bar.pack_start(&split_v_btn);
 
         let sync_btn = gtk::ToggleButton::new();
@@ -400,12 +603,14 @@ impl TilixWindow {
         sync_btn.set_tooltip_text(Some("Toggle Synchronized Input (Ctrl+Shift+I)"));
         sync_btn.set_action_name(Some("win.toggle-sync-input"));
         sync_btn.add_css_class("flat");
+        sync_btn.set_valign(gtk::Align::Center);
         header_bar.pack_start(&sync_btn);
 
         let menu_btn = gtk::MenuButton::new();
         menu_btn.set_icon_name("open-menu-symbolic");
         menu_btn.set_tooltip_text(Some("Main Menu"));
         menu_btn.set_primary(true);
+        menu_btn.set_valign(gtk::Align::Center);
         header_bar.pack_end(&menu_btn);
 
         let app_menu = gio::Menu::new();
@@ -422,6 +627,13 @@ impl TilixWindow {
         tab_bar.set_autohide(false);
         tab_bar.set_visible(cfg.show_tab_bar);
         WINDOW_TAB_BARS.with(|bars| bars.borrow_mut().push(tab_bar.downgrade()));
+
+        if cfg.compact_mode {
+            window.add_css_class("compact");
+            header_bar.add_css_class("compact");
+            tab_bar.add_css_class("compact");
+        }
+        WINDOW_INSTANCES.with(|wins| wins.borrow_mut().push(window.downgrade()));
 
         let win_weak = window.downgrade();
         let tv_weak = tab_view.downgrade();
@@ -1519,6 +1731,26 @@ mod tests {
     fn test_setup_css_loads_without_errors() {
         run_gtk_test(|| {
             setup_css();
+        });
+    }
+
+    #[test]
+    fn test_apply_compact_mode_to_all_windows() {
+        run_gtk_test(|| {
+            let app = adw::Application::builder()
+                .application_id("com.github.tilix_rust.test_compact_projection")
+                .flags(gio::ApplicationFlags::NON_UNIQUE)
+                .build();
+            let win = adw::ApplicationWindow::new(&app);
+            register_window_instance(&win);
+
+            assert!(!win.has_css_class("compact"));
+
+            apply_compact_mode_to_all_windows(true);
+            assert!(win.has_css_class("compact"));
+
+            apply_compact_mode_to_all_windows(false);
+            assert!(!win.has_css_class("compact"));
         });
     }
 }

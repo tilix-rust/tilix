@@ -1,7 +1,7 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.14.0 (Phase 14 OSC 52 & Desktop Clipboard Integration)  
+**Version:** 0.15.0 (Phase 15 Compact Mode UI Density Optimization)  
 **Date:** 2026-09-19  
 
 
@@ -796,6 +796,46 @@ Target window dimensions are computed from the profile's character grid and acti
   - Shortcuts tab includes `ActionCategory::Clipboard`.
   - Profile General tab includes `Automatically copy selection to clipboard` checkbutton.
   - Profile Compatibility tab includes `Allow terminal applications to set clipboard (OSC 52)` and `Allow terminal applications to read clipboard (OSC 52 query)` checkbuttons.
+
+---
+
+## 27. Compact Mode UI Density Optimization (Phase 15)
+
+### 27.1 Motivation & Density Architecture
+Power users working on compact screens, high-density laptops, or multi-split layouts frequently require maximum vertical terminal line count. Standard GNOME Libadwaita chrome allocates generous touch targets and relaxed padding:
+- Standard `adw::HeaderBar`: 46px min-height (with 34px buttons).
+- Standard `adw::TabBar`: 38px min-height.
+- Standard `terminal-pane-header`: 36px height.
+Combined, default chrome consumes **120px** of vertical height (~6 rows of terminal text on standard monospace grids).
+
+Phase 15 introduces **Scheme A: Compact Mode**, compressing all chrome elements to yield **48px** (more than 2 full text rows) of vertical space back to the active terminal canvas without sacrificing window controls, tab visibility, or pane management tools, while eliminating the 3px Libadwaita spacing gap between top bars and terminal content.
+
+### 27.2 Domain Model & Backwards Compatibility (`src/model/config.rs`)
+- **Schema Extension:** `AppConfig` incorporates `#[serde(default)] pub compact_mode: bool`.
+- **Default State:** `compact_mode: false` preserves standard GNOME HIG ergonomics out-of-the-box.
+- **Serialization Safety:** Backwards-compatible deserialization guarantees legacy `config.json` payloads without the `compact_mode` key deserialize cleanly to `false` without data loss or schema faults.
+
+### 27.3 Dynamic Geometry Engine (`src/ui/geometry.rs`)
+- **Chrome Constants:**
+  - `COMPACT_HEADER_BAR_HEIGHT = 28` (Δ = -18px from default 46px).
+  - `COMPACT_TAB_BAR_HEIGHT = 22` (Δ = -16px from default 38px).
+  - `COMPACT_PANE_HEADER_HEIGHT = 22` (Δ = -14px from default 36px).
+- **Calculation Synchronization:** In `calculate_window_size_from_cell_size`, base chrome heights conditionally resolve to compact values when `app_config.compact_mode` is enabled, guaranteeing that initial window sizing for target column/row allocations matches the active density mode (yielding a 48px vertical saving for standard 80x24 profiles).
+- **Hidden Chrome Invariance:** When toolbar, tabbar, and pane titles are hidden (`WindowStyle::HideToolbar`, `show_tab_bar: false`, `PaneTitleStyle::None`), compact and standard configurations evaluate to identical canvas dimensions.
+
+### 27.4 CSS Density Styling (`src/ui/window.rs`)
+The global stylesheet (`setup_css()`) is augmented with high-density `.compact` selectors:
+- **Zero Top-Bar Gap:** Explicit `padding: 0` on `toolbarview > .top-bar` and `.collapse-spacing` eliminates the default Libadwaita 3px gap, allowing the tab bar to seat seamlessly against the terminal content.
+- **HeaderBar & Window Title:** `toolbarview > .top-bar .collapse-spacing headerbar` and `headerbar > windowhandle > box` reset to `min-height: 28px` with 0 padding; `windowtitle` set to 20px min-height; header buttons set to `22px` with 16px icons.
+- **Window Controls:** Minimize, maximize, and close buttons receive `20px` minimum bounds and `1px` padding with zero vertical margin, preventing clipping against the window edge.
+- **TabBar, TabBox & Tabs:** High-specificity overrides for `toolbarview > .top-bar .collapse-spacing tabbar tabbox` compress `tabbox` to `22px` min-height with 0 padding; child `tab` compressed to `20px` min-height with `0 4px` padding and 18px close buttons; `.box` margin/box-shadow neutralized.
+- **Terminal Pane Headers:** `.terminal-pane-header` compressed to `22px` min-height, padding tightened to `0 4px`, header buttons set to `18px`, and title labels scaled to `0.85em`.
+
+### 27.5 Reactive Projection & Thread-Local Registry (`src/ui/window.rs`)
+- **Weak Window Registry:** Windows are registered in `static WINDOW_INSTANCES: RefCell<Vec<glib::WeakRef<adw::ApplicationWindow>>>`.
+- **Zero-Restart Live Updates:** `apply_compact_mode_to_all_windows(compact: bool)` dynamically adds or removes the `.compact` class across all active `WINDOW_INSTANCES`, `WINDOW_HEADER_BARS`, and `WINDOW_TAB_BARS` simultaneously, automatically pruning dead weak references.
+- **Preferences UI Integration:** An interactive `adw::SwitchRow` in `Preferences -> Appearance -> Window` allows users to toggle Compact Mode instantly with immediate visual feedback across all open windows.
+
 
 
 

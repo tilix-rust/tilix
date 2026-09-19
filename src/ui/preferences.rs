@@ -2349,6 +2349,12 @@ impl TilixPreferencesWindow {
         show_tab_bar_row.set_active(current_config.borrow().show_tab_bar);
         window_group.add(&show_tab_bar_row);
 
+        let compact_mode_row = adw::SwitchRow::new();
+        compact_mode_row.set_title("Compact Mode");
+        compact_mode_row.set_subtitle("Reduce padding and titlebar heights for maximum terminal display area");
+        compact_mode_row.set_active(current_config.borrow().compact_mode);
+        window_group.add(&compact_mode_row);
+
         appearance_page.add(&window_group);
 
         let title_group = adw::PreferencesGroup::new();
@@ -2415,6 +2421,7 @@ impl TilixPreferencesWindow {
             let w_style = window_style_row.clone();
             let w_handle = wide_handle_row.clone();
             let t_bar = show_tab_bar_row.clone();
+            let c_mode = compact_mode_row.clone();
             let t_style = title_style_row.clone();
             let t_single = title_show_single_row.clone();
 
@@ -2425,6 +2432,7 @@ impl TilixPreferencesWindow {
                 };
                 let use_wide_handle = w_handle.is_active();
                 let show_tab_bar = t_bar.is_active();
+                let compact_mode = c_mode.is_active();
                 let pane_title_style = match t_style.selected() {
                     1 => PaneTitleStyle::None,
                     _ => PaneTitleStyle::Normal,
@@ -2435,6 +2443,7 @@ impl TilixPreferencesWindow {
                 cfg.window_style = window_style;
                 cfg.use_wide_handle = use_wide_handle;
                 cfg.show_tab_bar = show_tab_bar;
+                cfg.compact_mode = compact_mode;
                 cfg.pane_title_style = pane_title_style;
                 cfg.pane_title_show_when_single = pane_title_show_when_single;
 
@@ -2442,6 +2451,7 @@ impl TilixPreferencesWindow {
                 crate::ui::window::apply_window_style_to_all_windows(cfg.window_style);
                 crate::ui::window::apply_wide_handle_to_all_sessions(cfg.use_wide_handle);
                 crate::ui::window::apply_show_tab_bar_to_all_windows(cfg.show_tab_bar);
+                crate::ui::window::apply_compact_mode_to_all_windows(cfg.compact_mode);
                 crate::ui::window::apply_pane_title_settings_to_all_sessions(
                     cfg.pane_title_style,
                     cfg.pane_title_show_when_single,
@@ -2458,6 +2468,8 @@ impl TilixPreferencesWindow {
             title_style_row.connect_selected_notify(move |_| s4());
             let s5 = Rc::clone(&save_app);
             title_show_single_row.connect_active_notify(move |_| s5());
+            let s6 = Rc::clone(&save_app);
+            compact_mode_row.connect_active_notify(move |_| s6());
 
             let config_rc_titles = Rc::clone(&current_config);
             let s_entry = session_name_entry.clone();
