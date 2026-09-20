@@ -462,6 +462,7 @@ fn show_edit_link_dialog<W: IsA<gtk::Window>, F: Fn(CustomHyperlinkRule) + 'stat
     dialog.present();
 }
 
+#[derive(Clone)]
 #[allow(deprecated)]
 pub struct TilixPreferencesWindow {
     window: adw::PreferencesWindow,
@@ -491,6 +492,7 @@ impl TilixPreferencesWindow {
         // PROFILES PAGE (100% UI Parity with Original Tilix)
         // =========================================================================
         let profiles_page = adw::PreferencesPage::new();
+        profiles_page.set_name(Some("profiles"));
         profiles_page.set_title("Profiles");
         profiles_page.set_icon_name(Some("org.gnome.Settings-symbolic"));
 
@@ -2325,6 +2327,7 @@ impl TilixPreferencesWindow {
         // APPEARANCE PAGE (Window & Title)
         // =========================================================================
         let appearance_page = adw::PreferencesPage::new();
+        appearance_page.set_name(Some("appearance"));
         appearance_page.set_title("Appearance");
         appearance_page.set_icon_name(Some("preferences-desktop-appearance-symbolic"));
 
@@ -2503,6 +2506,7 @@ impl TilixPreferencesWindow {
         // BEHAVIOR PAGE (Quake & Notifications)
         // =========================================================================
         let behavior_page = adw::PreferencesPage::new();
+        behavior_page.set_name(Some("behavior"));
         behavior_page.set_title("Behavior");
         behavior_page.set_icon_name(Some("preferences-system-symbolic"));
 
@@ -2583,6 +2587,7 @@ impl TilixPreferencesWindow {
         // SHORTCUTS PAGE
         // =========================================================================
         let shortcuts_page = adw::PreferencesPage::new();
+        shortcuts_page.set_name(Some("shortcuts"));
         shortcuts_page.set_title("Shortcuts");
         shortcuts_page.set_icon_name(Some("preferences-desktop-keyboard-shortcuts-symbolic"));
 
@@ -2770,6 +2775,10 @@ impl TilixPreferencesWindow {
 
     pub fn present(&self) {
         self.window.present();
+    }
+
+    pub fn set_visible_page_name(&self, name: &str) {
+        self.window.set_visible_page_name(name);
     }
 }
 

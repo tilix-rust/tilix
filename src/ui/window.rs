@@ -551,6 +551,15 @@ pub struct TilixWindow {
     sessions: SessionMap,
     next_session_id: Rc<RefCell<u64>>,
     title_widget: adw::WindowTitle,
+    preferences_window: Rc<RefCell<Option<TilixPreferencesWindow>>>,
+}
+
+fn refocus_active_pane(tab_view: &adw::TabView, sessions: &SessionMap) {
+    if let Some(page) = tab_view.selected_page() {
+        if let Some(session) = sessions.borrow().get(&page).cloned() {
+            session.borrow().grab_focus();
+        }
+    }
 }
 
 impl TilixWindow {
@@ -582,6 +591,7 @@ impl TilixWindow {
         new_tab_btn.set_action_name(Some("win.new-tab"));
         new_tab_btn.add_css_class("flat");
         new_tab_btn.set_valign(gtk::Align::Center);
+        new_tab_btn.set_focusable(false);
         header_bar.pack_start(&new_tab_btn);
 
         let split_h_btn = gtk::Button::from_icon_name("object-flip-horizontal-symbolic");
@@ -589,6 +599,7 @@ impl TilixWindow {
         split_h_btn.set_action_name(Some("win.split-right"));
         split_h_btn.add_css_class("flat");
         split_h_btn.set_valign(gtk::Align::Center);
+        split_h_btn.set_focusable(false);
         header_bar.pack_start(&split_h_btn);
 
         let split_v_btn = gtk::Button::from_icon_name("object-flip-vertical-symbolic");
@@ -596,6 +607,7 @@ impl TilixWindow {
         split_v_btn.set_action_name(Some("win.split-down"));
         split_v_btn.add_css_class("flat");
         split_v_btn.set_valign(gtk::Align::Center);
+        split_v_btn.set_focusable(false);
         header_bar.pack_start(&split_v_btn);
 
         let sync_btn = gtk::ToggleButton::new();
@@ -604,6 +616,7 @@ impl TilixWindow {
         sync_btn.set_action_name(Some("win.toggle-sync-input"));
         sync_btn.add_css_class("flat");
         sync_btn.set_valign(gtk::Align::Center);
+        sync_btn.set_focusable(false);
         header_bar.pack_start(&sync_btn);
 
         let menu_btn = gtk::MenuButton::new();
@@ -611,6 +624,7 @@ impl TilixWindow {
         menu_btn.set_tooltip_text(Some("Main Menu"));
         menu_btn.set_primary(true);
         menu_btn.set_valign(gtk::Align::Center);
+        menu_btn.set_focusable(false);
         header_bar.pack_end(&menu_btn);
 
         let app_menu = gio::Menu::new();
@@ -672,6 +686,51 @@ impl TilixWindow {
 
         let sessions = Rc::new(RefCell::new(HashMap::new()));
         let next_session_id = Rc::new(RefCell::new(1u64));
+        let preferences_window: Rc<RefCell<Option<TilixPreferencesWindow>>> = Rc::new(RefCell::new(None));
+
+        if let Some(popover) = menu_btn.popover() {
+            let tv_weak_pop = tab_view.downgrade();
+            let sess_pop = Rc::clone(&sessions);
+            let pref_holder_pop = Rc::clone(&preferences_window);
+            popover.connect_closed(move |_| {
+                if let Ok(holder) = pref_holder_pop.try_borrow() {
+                    if let Some(ref pref) = *holder {
+                        if pref.window().is_visible() {
+                            return;
+                        }
+                    }
+                }
+                let tv_opt = tv_weak_pop.upgrade();
+                let s_map = Rc::clone(&sess_pop);
+                glib::idle_add_local_once(move || {
+                    if let Some(tv) = tv_opt {
+                        refocus_active_pane(&tv, &s_map);
+                    }
+                });
+            });
+        }
+
+        let tv_weak_active = tab_view.downgrade();
+        let sess_active = Rc::clone(&sessions);
+        let pref_holder_active = Rc::clone(&preferences_window);
+        window.connect_is_active_notify(move |win| {
+            if win.is_active() {
+                if let Ok(holder) = pref_holder_active.try_borrow() {
+                    if let Some(ref pref) = *holder {
+                        if pref.window().is_visible() {
+                            return;
+                        }
+                    }
+                }
+                let tv_opt = tv_weak_active.upgrade();
+                let s_map = Rc::clone(&sess_active);
+                glib::idle_add_local_once(move || {
+                    if let Some(tv) = tv_opt {
+                        refocus_active_pane(&tv, &s_map);
+                    }
+                });
+            }
+        });
 
         let tilix_win = Self {
             window,
@@ -679,6 +738,7 @@ impl TilixWindow {
             sessions,
             next_session_id,
             title_widget,
+            preferences_window,
         };
 
         tilix_win.setup_tab_close_handler();
@@ -1120,12 +1180,56 @@ impl TilixWindow {
         {
             let action = gio::SimpleAction::new("preferences", None);
             let win_weak = self.window.downgrade();
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            let pref_holder = Rc::clone(&self.preferences_window);
+
             action.connect_activate(move |_, _| {
                 let Some(win) = win_weak.upgrade() else { return; };
-                let pref = TilixPreferencesWindow::new(Some(&win), move |profile| {
-                    apply_profile_to_all_sessions(profile);
-                });
-                pref.present();
+                if let Ok(mut holder) = pref_holder.try_borrow_mut() {
+                    if let Some(ref pref) = *holder {
+                        if pref.window().is_visible() {
+                            pref.present();
+                            return;
+                        }
+                    }
+                    let pref = TilixPreferencesWindow::new(Some(&win), move |profile| {
+                        apply_profile_to_all_sessions(profile);
+                    });
+
+                    let tv_weak = tab_view_weak.clone();
+                    let sess_map = Rc::clone(&sessions);
+                    let holder_weak = Rc::clone(&pref_holder);
+
+                    pref.window().connect_close_request(move |_| {
+                        if let Ok(mut h) = holder_weak.try_borrow_mut() {
+                            *h = None;
+                        }
+                        let tv_opt = tv_weak.upgrade();
+                        let s_map = Rc::clone(&sess_map);
+                        glib::idle_add_local_once(move || {
+                            if let Some(tv) = tv_opt {
+                                refocus_active_pane(&tv, &s_map);
+                            }
+                        });
+                        glib::Propagation::Proceed
+                    });
+
+                    let tv_weak2 = tab_view_weak.clone();
+                    let sess_map2 = Rc::clone(&sessions);
+                    pref.window().connect_destroy(move |_| {
+                        let tv_opt = tv_weak2.upgrade();
+                        let s_map = Rc::clone(&sess_map2);
+                        glib::idle_add_local_once(move || {
+                            if let Some(tv) = tv_opt {
+                                refocus_active_pane(&tv, &s_map);
+                            }
+                        });
+                    });
+
+                    pref.present();
+                    *holder = Some(pref);
+                }
             });
             self.window.add_action(&action);
         }
@@ -1173,6 +1277,13 @@ impl TilixWindow {
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
                     session.borrow().balance_layout();
+                    session.borrow().grab_focus();
+                    let s_weak = Rc::downgrade(&session);
+                    glib::idle_add_local_once(move || {
+                        if let Some(s) = s_weak.upgrade() {
+                            s.borrow().grab_focus();
+                        }
+                    });
                 }
             });
             self.window.add_action(&action);
@@ -1198,9 +1309,152 @@ impl TilixWindow {
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
                     session.borrow().set_sync_input_enabled(new_state);
+                    session.borrow().grab_focus();
+                    let s_weak = Rc::downgrade(&session);
+                    glib::idle_add_local_once(move || {
+                        if let Some(s) = s_weak.upgrade() {
+                            s.borrow().grab_focus();
+                        }
+                    });
                 }
             });
             self.window.add_action(&action);
+
+            // Save Layout ("win.save-layout" from menu)
+            {
+                let action = gio::SimpleAction::new("save-layout", None);
+                let tab_view_weak = self.tab_view.downgrade();
+                let sessions = Rc::clone(&self.sessions);
+
+                action.connect_activate(move |_, _| {
+                    let Some(tv) = tab_view_weak.upgrade() else { return; };
+                    let Some(page) = tv.selected_page() else { return; };
+                    let session_opt = sessions.borrow().get(&page).cloned();
+                    if let Some(session) = session_opt {
+                        let s = session.borrow();
+                        let title = s.active_title();
+                        let model = s.model();
+                        let template = SessionLayoutTemplate::from_session(&title, &model);
+                        if let Ok(json) = template.to_json() {
+                            let path = crate::model::AppConfig::config_dir().join("templates");
+                            let _ = std::fs::create_dir_all(&path);
+                            let file_name = format!("{}.json", title.replace(['/', '\\', ' '], "_"));
+                            let _ = std::fs::write(path.join(&file_name), &json);
+                            let _ = std::fs::write(path.join("latest.json"), &json);
+                            if let Some(display) = gtk::gdk::Display::default() {
+                                display.clipboard().set_text(&json);
+                            }
+                        }
+                        drop(model);
+                        drop(s);
+                        session.borrow().grab_focus();
+                        let s_weak = Rc::downgrade(&session);
+                        glib::idle_add_local_once(move || {
+                            if let Some(s) = s_weak.upgrade() {
+                                s.borrow().grab_focus();
+                            }
+                        });
+                    }
+                });
+                self.window.add_action(&action);
+            }
+
+            // Shortcuts ("win.shortcuts" from menu)
+            {
+                let action = gio::SimpleAction::new("shortcuts", None);
+                let win_weak = self.window.downgrade();
+                let tab_view_weak = self.tab_view.downgrade();
+                let sessions = Rc::clone(&self.sessions);
+                let pref_holder = Rc::clone(&self.preferences_window);
+
+                action.connect_activate(move |_, _| {
+                    let Some(win) = win_weak.upgrade() else { return; };
+                    if let Ok(mut holder) = pref_holder.try_borrow_mut() {
+                        if let Some(ref pref) = *holder {
+                            if pref.window().is_visible() {
+                                pref.set_visible_page_name("shortcuts");
+                                pref.present();
+                                return;
+                            }
+                        }
+                        let pref = TilixPreferencesWindow::new(Some(&win), move |profile| {
+                            apply_profile_to_all_sessions(profile);
+                        });
+                        pref.set_visible_page_name("shortcuts");
+
+                        let tv_weak = tab_view_weak.clone();
+                        let sess_map = Rc::clone(&sessions);
+                        let holder_weak = Rc::clone(&pref_holder);
+
+                        pref.window().connect_close_request(move |_| {
+                            if let Ok(mut h) = holder_weak.try_borrow_mut() {
+                                *h = None;
+                            }
+                            let tv_opt = tv_weak.upgrade();
+                            let s_map = Rc::clone(&sess_map);
+                            glib::idle_add_local_once(move || {
+                                if let Some(tv) = tv_opt {
+                                    refocus_active_pane(&tv, &s_map);
+                                }
+                            });
+                            glib::Propagation::Proceed
+                        });
+
+                        let tv_weak2 = tab_view_weak.clone();
+                        let sess_map2 = Rc::clone(&sessions);
+                        pref.window().connect_destroy(move |_| {
+                            let tv_opt = tv_weak2.upgrade();
+                            let s_map = Rc::clone(&sess_map2);
+                            glib::idle_add_local_once(move || {
+                                if let Some(tv) = tv_opt {
+                                    refocus_active_pane(&tv, &s_map);
+                                }
+                            });
+                        });
+
+                        pref.present();
+                        *holder = Some(pref);
+                    }
+                });
+                self.window.add_action(&action);
+            }
+
+            // About Tilix ("win.about" from menu)
+            {
+                let action = gio::SimpleAction::new("about", None);
+                let win_weak = self.window.downgrade();
+                let tab_view_weak = self.tab_view.downgrade();
+                let sessions = Rc::clone(&self.sessions);
+
+                action.connect_activate(move |_, _| {
+                    let Some(win) = win_weak.upgrade() else { return; };
+                    let about = gtk::AboutDialog::builder()
+                        .transient_for(&win)
+                        .modal(true)
+                        .program_name("Tilix")
+                        .version("0.1.0")
+                        .comments("A tiling terminal emulator for Linux")
+                        .website("https://github.com/gnunn1/tilix")
+                        .license_type(gtk::License::Gpl30)
+                        .build();
+
+                    let tv_weak = tab_view_weak.clone();
+                    let sess_map = Rc::clone(&sessions);
+                    about.connect_close_request(move |_| {
+                        let tv_opt = tv_weak.upgrade();
+                        let s_map = Rc::clone(&sess_map);
+                        glib::idle_add_local_once(move || {
+                            if let Some(tv) = tv_opt {
+                                refocus_active_pane(&tv, &s_map);
+                            }
+                        });
+                        glib::Propagation::Proceed
+                    });
+
+                    about.present();
+                });
+                self.window.add_action(&action);
+            }
 
             // Sync action state with active tab when tab selection changes
             let action_weak = action.downgrade();
@@ -1471,8 +1725,13 @@ impl TilixWindow {
         self.active_session()
     }
 
+    pub fn grab_focus(&self) {
+        refocus_active_pane(&self.tab_view, &self.sessions);
+    }
+
     pub fn present(&self) {
         self.window.present();
+        self.grab_focus();
     }
 
     pub fn apply_profile(&self, profile: &Profile) {
@@ -1746,6 +2005,125 @@ mod tests {
 
             apply_compact_mode_to_all_windows(false);
             assert!(!win.has_css_class("compact"));
+        });
+    }
+
+    #[test]
+    fn test_window_headerbar_buttons_non_focusable() {
+        run_gtk_test(|| {
+            let app = adw::Application::builder()
+                .application_id("com.github.tilix_rust.test_header_buttons_focus")
+                .flags(gio::ApplicationFlags::NON_UNIQUE)
+                .build();
+            let tilix_win = TilixWindow::new(&app);
+            let win = tilix_win.window();
+
+            // Find all buttons inside the header bar
+            fn collect_buttons(widget: &gtk::Widget, buttons: &mut Vec<gtk::Widget>) {
+                if widget.is::<gtk::Button>() || widget.is::<gtk::ToggleButton>() || widget.is::<gtk::MenuButton>() {
+                    buttons.push(widget.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(c) = child {
+                    collect_buttons(&c, buttons);
+                    child = c.next_sibling();
+                }
+            }
+
+            let mut buttons = Vec::new();
+            collect_buttons(win.upcast_ref(), &mut buttons);
+
+            // Verify that all collected headerbar buttons are non-focusable
+            assert!(!buttons.is_empty(), "Should have header buttons");
+            for btn in &buttons {
+                assert!(
+                    !btn.is_focusable(),
+                    "Header button of type {} must have focusable=false to prevent stealing focus",
+                    btn.type_().name()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_toggle_sync_input_and_balance_layout_refocus_pane() {
+        run_gtk_test(|| {
+            let app = adw::Application::builder()
+                .application_id("com.github.tilix_rust.test_actions_refocus")
+                .flags(gio::ApplicationFlags::NON_UNIQUE)
+                .build();
+            let tilix_win = TilixWindow::new(&app);
+            let session = tilix_win.session_view().expect("session must exist");
+
+            let pane = session.borrow().active_pane().expect("pane must exist");
+
+            // Trigger toggle-sync-input
+            let action = tilix_win
+                .window()
+                .lookup_action("toggle-sync-input")
+                .expect("toggle-sync-input action must exist");
+            action.activate(None);
+
+            // Process idle callbacks
+            let ctx = glib::MainContext::default();
+            while ctx.iteration(false) {}
+
+            assert!(
+                pane.terminal().has_focus(),
+                "Active terminal pane should have focus after toggle-sync-input"
+            );
+
+            // Trigger balance-layout
+            let bal_action = tilix_win
+                .window()
+                .lookup_action("balance-layout")
+                .expect("balance-layout action must exist");
+            bal_action.activate(None);
+
+            while ctx.iteration(false) {}
+
+            assert!(
+                pane.terminal().has_focus(),
+                "Active terminal pane should have focus after balance-layout"
+            );
+        });
+    }
+
+    #[test]
+    fn test_preferences_window_close_refocuses_pane() {
+        run_gtk_test(|| {
+            let app = adw::Application::builder()
+                .application_id("com.github.tilix_rust.test_pref_close_refocus")
+                .flags(gio::ApplicationFlags::NON_UNIQUE)
+                .build();
+            let tilix_win = TilixWindow::new(&app);
+            let session = tilix_win.session_view().expect("session must exist");
+
+            let pane = session.borrow().active_pane().expect("pane must exist");
+
+            // Open preferences
+            let pref_action = tilix_win
+                .window()
+                .lookup_action("preferences")
+                .expect("preferences action must exist");
+            pref_action.activate(None);
+
+            let ctx = glib::MainContext::default();
+            while ctx.iteration(false) {}
+
+            let pref_window = tilix_win.preferences_window.borrow().clone();
+            assert!(pref_window.is_some(), "Preferences window should be opened");
+            let pref = pref_window.unwrap();
+
+            // Simulate closing preferences window
+            pref.window().close();
+
+            while ctx.iteration(false) {}
+
+            assert!(
+                pane.terminal().has_focus(),
+                "Active terminal pane should regain focus after preferences window closes"
+            );
         });
     }
 }

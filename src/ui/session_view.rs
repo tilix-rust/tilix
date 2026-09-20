@@ -745,7 +745,12 @@ impl SessionView {
     }
 
     pub fn grab_focus(&self) {
-        if let Some(id) = self.model.borrow().active_pane {
+        let active_id = self.model.borrow().active_pane;
+        let target_id = match active_id {
+            Some(id) if self.panes.borrow().contains_key(&id) => Some(id),
+            _ => self.panes.borrow().keys().next().copied(),
+        };
+        if let Some(id) = target_id {
             if let Some(pane) = self.panes.borrow().get(&id) {
                 pane.grab_focus();
             }
