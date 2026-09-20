@@ -109,6 +109,12 @@ fn test_makefile_content_specifications() {
     assert!(content.contains("install: build"));
     assert!(content.contains("uninstall:"));
     assert!(content.contains("clean:"));
+    assert!(!content.contains("rm -rf pkg src"));
+    assert!(!content.contains("rm -rf src"));
+    assert!(!content.contains("rm -r src"));
+
+    let gitignore = fs::read_to_string(".gitignore").expect("failed to read .gitignore");
+    assert!(!gitignore.lines().any(|l| l.trim() == "/src/" || l.trim() == "src/" || l.trim() == "/src" || l.trim() == "src"));
 }
 
 #[test]

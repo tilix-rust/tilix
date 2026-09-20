@@ -47,4 +47,4 @@ uninstall:
 
 clean:
 	cargo clean
-	rm -rf pkg src *.pkg.tar.*
+	rm -rf pkg *.pkg.tar.* tilix-rust-*
