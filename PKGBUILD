@@ -30,7 +30,7 @@ prepare() {
 build() {
     cd "$startdir"
     export CARGO_TARGET_DIR=target
-    cargo build --release --all-targets
+    cargo build --release
 }
 
 check() {

@@ -86,7 +86,7 @@ fn test_pkgbuild_content_specifications() {
     assert!(content.contains("license=('MPL-2.0')"));
     assert!(content.contains("provides=('tilix')"));
     assert!(content.contains("conflicts=('tilix')"));
-    assert!(content.contains("cargo build --release --all-targets"));
+    assert!(content.contains("cargo build --release"));
     assert!(content.contains("cargo test --release"));
     assert!(content.contains("com.github.tilix_rust.desktop"));
     assert!(content.contains("com.github.tilix_rust.metainfo.xml"));
