@@ -96,6 +96,7 @@ fn test_pkgbuild_content_specifications() {
     assert!(content.contains("completions/bash/tilix"));
     assert!(content.contains("completions/zsh/_tilix"));
     assert!(content.contains("completions/fish/tilix.fish"));
+    assert!(content.contains("BUILDDIR="), "PKGBUILD must isolate BUILDDIR to protect src/ from makepkg -C / -c");
 }
 
 #[test]

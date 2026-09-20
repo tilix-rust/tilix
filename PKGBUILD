@@ -11,6 +11,12 @@ depends=('gtk4' 'libadwaita' 'vte4')
 makedepends=('cargo' 'rust')
 provides=('tilix')
 conflicts=('tilix')
+# Isolate makepkg build/scratch directories so $srcdir does not collide with the project's src/ directory.
+# This prevents `makepkg -C` (--cleanbuild) or `makepkg -c` (--clean) from deleting the Rust source tree.
+if [[ -z "$BUILDDIR" || "$BUILDDIR" -ef "$startdir" ]]; then
+    BUILDDIR="$startdir/target/makepkg"
+fi
+
 source=()
 sha256sums=()
 
