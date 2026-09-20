@@ -102,6 +102,7 @@ pub struct TerminalPane {
     process_guard: Rc<ChildProcessGuard>,
     is_sync_enabled: Rc<Cell<bool>>,
     is_closing: Rc<Cell<bool>>,
+    is_feeding: Rc<Cell<bool>>,
     close_callbacks: Rc<RefCell<Vec<CloseCallback>>>,
     split_callbacks: Rc<RefCell<Vec<SplitCallback>>>,
     focus_callbacks: Rc<RefCell<Vec<FocusCallback>>>,
@@ -291,6 +292,7 @@ impl TerminalPane {
         ));
         let is_sync_enabled = Rc::new(Cell::new(true));
         let is_closing = Rc::new(Cell::new(false));
+        let is_feeding = Rc::new(Cell::new(false));
         let close_callbacks: Rc<RefCell<Vec<CloseCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let split_callbacks: Rc<RefCell<Vec<SplitCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let focus_callbacks: Rc<RefCell<Vec<FocusCallback>>> = Rc::new(RefCell::new(Vec::new()));
@@ -524,7 +526,11 @@ impl TerminalPane {
         // Wire commit notification (for synchronized input)
         {
             let callbacks = Rc::clone(&commit_callbacks);
+            let is_feeding = Rc::clone(&is_feeding);
             terminal.connect_commit(move |_term, text, _size| {
+                if is_feeding.get() {
+                    return;
+                }
                 if let Ok(list) = callbacks.try_borrow() {
                     for cb in list.iter() {
                         cb(pane_id, text);
@@ -714,6 +720,7 @@ impl TerminalPane {
             process_guard,
             is_sync_enabled,
             is_closing,
+            is_feeding,
             close_callbacks,
             split_callbacks,
             focus_callbacks,
@@ -1166,7 +1173,19 @@ impl TerminalPane {
         self.sync_btn.set_active(enabled);
     }
 
+    pub fn is_feeding(&self) -> bool {
+        self.is_feeding.get()
+    }
+
     pub fn feed_child(&self, data: &[u8]) {
+        self.is_feeding.set(true);
+        struct FeedGuard(Rc<Cell<bool>>);
+        impl Drop for FeedGuard {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let _guard = FeedGuard(Rc::clone(&self.is_feeding));
         self.terminal.feed_child(data);
     }
 
@@ -1977,6 +1996,30 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             assert!(exited, "Process must be dead after last pane drop");
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_feed_child_suppresses_commit() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(100), None);
+            let commits = Rc::new(RefCell::new(Vec::new()));
+            {
+                let commits = Rc::clone(&commits);
+                pane.connect_commit(move |_id, text| {
+                    commits.borrow_mut().push(text.to_string());
+                });
+            }
+
+            // Directly calling feed_child should NOT trigger commit callbacks
+            pane.feed_child(b"test data");
+            assert!(commits.borrow().is_empty(), "feed_child must suppress commit callbacks");
+
+            // But emitting commit directly (as user typing) DOES trigger commit callbacks
+            pane.terminal().emit_by_name::<()>("commit", &[&"user typed", &10u32]);
+            assert_eq!(*commits.borrow(), vec!["user typed".to_string()]);
+
+            pane.close();
         });
     }
 }

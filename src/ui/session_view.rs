@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -37,6 +37,7 @@ pub struct SessionView {
     use_wide_handle: Rc<RefCell<bool>>,
     pane_title_style: Rc<RefCell<PaneTitleStyle>>,
     pane_title_show_when_single: Rc<RefCell<bool>>,
+    is_broadcasting: Rc<Cell<bool>>,
 }
 
 impl SessionView {
@@ -76,6 +77,7 @@ impl SessionView {
         let use_wide_handle = Rc::new(RefCell::new(cfg.use_wide_handle));
         let pane_title_style = Rc::new(RefCell::new(cfg.pane_title_style));
         let pane_title_show_when_single = Rc::new(RefCell::new(cfg.pane_title_show_when_single));
+        let is_broadcasting = Rc::new(Cell::new(false));
 
         let session = Self {
             container,
@@ -87,6 +89,7 @@ impl SessionView {
             use_wide_handle,
             pane_title_style,
             pane_title_show_when_single,
+            is_broadcasting,
         };
 
         session.setup_dock_handler();
@@ -100,6 +103,7 @@ impl SessionView {
             &session.action_handler,
             &session.title_changed_callback,
             &session.dock_handler,
+            &session.is_broadcasting,
         );
         session.panes.borrow_mut().insert(pane_id, pane);
         session.rebuild_projection();
@@ -122,6 +126,7 @@ impl SessionView {
         let use_wide_handle = Rc::new(RefCell::new(cfg.use_wide_handle));
         let pane_title_style = Rc::new(RefCell::new(cfg.pane_title_style));
         let pane_title_show_when_single = Rc::new(RefCell::new(cfg.pane_title_show_when_single));
+        let is_broadcasting = Rc::new(Cell::new(false));
 
         let session = Self {
             container,
@@ -133,6 +138,7 @@ impl SessionView {
             use_wide_handle,
             pane_title_style,
             pane_title_show_when_single,
+            is_broadcasting,
         };
 
         session.setup_dock_handler();
@@ -147,6 +153,7 @@ impl SessionView {
                 &session.action_handler,
                 &session.title_changed_callback,
                 &session.dock_handler,
+                &session.is_broadcasting,
             );
             session.panes.borrow_mut().insert(id, pane);
         }
@@ -164,6 +171,7 @@ impl SessionView {
         let wide_w = Rc::downgrade(&self.use_wide_handle);
         let style_w = Rc::downgrade(&self.pane_title_style);
         let show_w = Rc::downgrade(&self.pane_title_show_when_single);
+        let broadcasting_w = Rc::downgrade(&self.is_broadcasting);
         let container = self.container.clone();
 
         *self.dock_handler.borrow_mut() = Some(Box::new(move |src, dest, pos| {
@@ -175,6 +183,7 @@ impl SessionView {
             let Some(use_wide_handle) = wide_w.upgrade() else { return; };
             let Some(pane_title_style) = style_w.upgrade() else { return; };
             let Some(pane_title_show_when_single) = show_w.upgrade() else { return; };
+            let Some(is_broadcasting) = broadcasting_w.upgrade() else { return; };
 
             let sv = SessionView {
                 container: container.clone(),
@@ -186,6 +195,7 @@ impl SessionView {
                 use_wide_handle,
                 pane_title_style,
                 pane_title_show_when_single,
+                is_broadcasting,
             };
             sv.dock_pane(src, dest, pos);
         }));
@@ -210,6 +220,7 @@ impl SessionView {
         action_handler: &Rc<RefCell<Option<ActionHandler>>>,
         title_changed_callback: &Rc<RefCell<Option<TitleChangedHandler>>>,
         dock_handler: &Rc<RefCell<Option<DockHandler>>>,
+        is_broadcasting: &Rc<Cell<bool>>,
     ) {
         pane.setup_drag_source();
         let dock_cb = Rc::clone(dock_handler);
@@ -287,7 +298,11 @@ impl SessionView {
         let panes_weak = Rc::downgrade(panes);
         let panes_commit = panes_weak.clone();
         let model_commit = Rc::clone(model);
+        let broadcasting = Rc::clone(is_broadcasting);
         pane.connect_commit(move |sender_id, text| {
+            if broadcasting.get() {
+                return;
+            }
             let Some(panes_rc) = panes_commit.upgrade() else { return; };
             let Ok(model) = model_commit.try_borrow() else { return; };
             if !model.sync_input_enabled {
@@ -301,6 +316,16 @@ impl SessionView {
             if !sender_sync {
                 return;
             }
+
+            broadcasting.set(true);
+            struct BroadcastGuard(Rc<Cell<bool>>);
+            impl Drop for BroadcastGuard {
+                fn drop(&mut self) {
+                    self.0.set(false);
+                }
+            }
+            let _guard = BroadcastGuard(Rc::clone(&broadcasting));
+
             for (target_id, target_pane) in panes.iter() {
                 if *target_id != sender_id && target_pane.is_sync_enabled() {
                     target_pane.feed_child(text.as_bytes());
@@ -376,6 +401,7 @@ impl SessionView {
         action_handler: &Rc<RefCell<Option<ActionHandler>>>,
         title_changed_callback: &Rc<RefCell<Option<TitleChangedHandler>>>,
         dock_handler: &Rc<RefCell<Option<DockHandler>>>,
+        is_broadcasting: &Rc<Cell<bool>>,
     ) -> TerminalPane {
         let pane = TerminalPane::new(id, initial_directory);
         let cfg = crate::model::AppConfig::load();
@@ -388,6 +414,7 @@ impl SessionView {
             action_handler,
             title_changed_callback,
             dock_handler,
+            is_broadcasting,
         );
 
         pane
@@ -455,6 +482,7 @@ impl SessionView {
             &self.action_handler,
             &self.title_changed_callback,
             &self.dock_handler,
+            &self.is_broadcasting,
         );
         self.panes.borrow_mut().insert(initial_pane_id, pane);
         self.rebuild_projection();
@@ -711,6 +739,7 @@ impl SessionView {
             &self.action_handler,
             &self.title_changed_callback,
             &self.dock_handler,
+            &self.is_broadcasting,
         );
         self.panes.borrow_mut().insert(pane_id, pane);
         let _ = self.model.borrow_mut().adopt_pane(pane_id, target_id, position);
@@ -797,6 +826,7 @@ impl SessionView {
                 &self.action_handler,
                 &self.title_changed_callback,
                 &self.dock_handler,
+                &self.is_broadcasting,
             );
             self.panes.borrow_mut().insert(new_id, new_pane);
             self.rebuild_projection();
@@ -2698,6 +2728,61 @@ mod tests {
                     panic!("Expected Split 2");
                 }
             }
+
+            session.close();
+        });
+    }
+
+    #[test]
+    fn test_session_view_sync_input_broadcasting_no_recursion() {
+        crate::ui::window::run_gtk_test(|| {
+            let session = SessionView::new();
+            let p1 = session.active_pane_id().unwrap();
+            session.split_active(SplitOrientation::Horizontal);
+            let p2 = session.panes.borrow().keys().find(|&&k| k != p1).copied().unwrap();
+
+            session.set_sync_input_enabled(true);
+            assert!(session.sync_input_enabled());
+
+            let pane1 = session.panes.borrow().get(&p1).unwrap().clone();
+            let pane2 = session.panes.borrow().get(&p2).unwrap().clone();
+            assert!(pane1.is_sync_enabled());
+            assert!(pane2.is_sync_enabled());
+
+            // Track commits received on pane2
+            let p2_commits = Rc::new(RefCell::new(Vec::new()));
+            {
+                let p2_commits = Rc::clone(&p2_commits);
+                pane2.connect_commit(move |_id, text| {
+                    p2_commits.borrow_mut().push(text.to_string());
+                });
+            }
+
+            // Track commits received on pane1
+            let p1_commits = Rc::new(RefCell::new(Vec::new()));
+            {
+                let p1_commits = Rc::clone(&p1_commits);
+                pane1.connect_commit(move |_id, text| {
+                    p1_commits.borrow_mut().push(text.to_string());
+                });
+            }
+
+            // Emitting commit on pane1's terminal widget (simulating keyboard input)
+            // Without re-entrancy protection, this would cause infinite recursion and stack overflow.
+            pane1.terminal().emit_by_name::<()>("commit", &[&"echo synchronized\n", &18u32]);
+
+            // Pane 1's commit callback was invoked once for the simulated user input
+            assert_eq!(p1_commits.borrow().len(), 1);
+            assert_eq!(p1_commits.borrow()[0], "echo synchronized\n");
+
+            // Pane 2 was fed via feed_child, so its commit callback is suppressed (no reflection loop)
+            assert_eq!(p2_commits.borrow().len(), 0);
+
+            // Now test with sync_input_enabled = false
+            session.set_sync_input_enabled(false);
+            pane1.terminal().emit_by_name::<()>("commit", &[&"secret\n", &7u32]);
+            assert_eq!(p1_commits.borrow().len(), 2);
+            assert_eq!(p2_commits.borrow().len(), 0);
 
             session.close();
         });
