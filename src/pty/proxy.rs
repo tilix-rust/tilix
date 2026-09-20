@@ -252,7 +252,7 @@ impl PtyProxy {
             .expect("Failed to spawn pty output forwarder");
     }
 
-    /// Propagates window dimensions to the inner PTY master and outer PTY slave.
+    /// Propagates window dimensions to the inner PTY master.
     /// Deduplicates calls so identical dimensions do not generate redundant kernel SIGWINCH signals.
     pub fn set_window_size(&self, rows: u16, cols: u16) {
         if rows == 0 || cols == 0 {
@@ -274,12 +274,6 @@ impl PtyProxy {
         if im >= 0 {
             unsafe {
                 libc::ioctl(im, libc::TIOCSWINSZ, &ws);
-            }
-        }
-        let os = self.outer_slave_fd();
-        if os >= 0 {
-            unsafe {
-                libc::ioctl(os, libc::TIOCSWINSZ, &ws);
             }
         }
     }

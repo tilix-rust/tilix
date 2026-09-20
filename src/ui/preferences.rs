@@ -1077,10 +1077,16 @@ impl TilixPreferencesWindow {
 
         let osc52_check =
             gtk::CheckButton::with_label("Allow terminal applications to set clipboard (OSC 52)");
+        osc52_check.set_tooltip_text(Some(
+            "Intercept OSC 52 escape sequences to update desktop clipboard (applies to newly created panes)",
+        ));
         compat_grid.attach(&osc52_check, 1, 4, 1, 1);
 
         let osc52_query_check =
             gtk::CheckButton::with_label("Allow terminal applications to read clipboard (OSC 52 query)");
+        osc52_query_check.set_tooltip_text(Some(
+            "Allow applications to query clipboard contents via OSC 52 (applies to newly created panes)",
+        ));
         compat_grid.attach(&osc52_query_check, 1, 5, 1, 1);
 
         let compat_scrolled = gtk::ScrolledWindow::builder()

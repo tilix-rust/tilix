@@ -573,29 +573,9 @@ impl TerminalPane {
 
         // Synchronize terminal window size to PTY proxy on dimension / font changes
         {
-            let pty_proxy_size = Rc::clone(&pty_proxy);
-            let update_size = Rc::new(move |term: &vte::Terminal| {
-                if let Some(ref proxy) = *pty_proxy_size.borrow() {
-                    let rows = term.row_count();
-                    let cols = term.column_count();
-                    let r = if rows > 0 { rows as u16 } else { 24 };
-                    let c = if cols > 0 { cols as u16 } else { 80 };
-                    proxy.set_window_size(r, c);
-                }
-            });
-
-            let u1 = Rc::clone(&update_size);
-            terminal.connect_char_size_changed(move |term, _w, _h| {
-                u1(term);
-            });
-
-            let u2 = Rc::clone(&update_size);
-            terminal.connect_resize_window(move |term, _w, _h| {
-                u2(term);
-            });
-
-            // Frame-synchronous size sync: ensures initial allocation and runtime resizing
-            // immediately propagate to PTY proxy inner master before shell prompt draws.
+            // Frame-synchronous size sync: ensures initial allocation, font zoom scaling,
+            // and runtime resizing immediately propagate to PTY proxy inner master once
+            // GTK layout allocation stabilizes, preventing intermediate geometry flicker.
             let pty_proxy_tick = Rc::clone(&pty_proxy);
             let last_cols = Cell::new(0i64);
             let last_rows = Cell::new(0i64);
@@ -1592,9 +1572,6 @@ impl TerminalPane {
 
     pub fn apply_profile(&self, profile: &Profile) {
         *self.current_profile.borrow_mut() = profile.clone();
-        let default_cols = profile.default_size_columns.max(1) as i64;
-        let default_rows = profile.default_size_rows.max(1) as i64;
-        self.terminal.set_size(default_cols, default_rows);
         let dir = self.current_directory();
         let widgets = PaneWidgets {
             terminal: self.terminal.clone(),
