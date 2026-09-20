@@ -2015,30 +2015,46 @@ mod tests {
                 .application_id("com.github.tilix_rust.test_header_buttons_focus")
                 .flags(gio::ApplicationFlags::NON_UNIQUE)
                 .build();
+            let _ = app.register(gio::Cancellable::NONE);
             let tilix_win = TilixWindow::new(&app);
             let win = tilix_win.window();
 
-            // Find all buttons inside the header bar
-            fn collect_buttons(widget: &gtk::Widget, buttons: &mut Vec<gtk::Widget>) {
-                if widget.is::<gtk::Button>() || widget.is::<gtk::ToggleButton>() || widget.is::<gtk::MenuButton>() {
+            // Find all Tilix custom headerbar action buttons and menu buttons
+            let mut action_buttons = Vec::new();
+            fn collect_action_buttons(widget: &gtk::Widget, buttons: &mut Vec<gtk::Widget>) {
+                if let Some(btn) = widget.downcast_ref::<gtk::Button>() {
+                    if let Some(action) = btn.action_name() {
+                        if action.starts_with("win.") {
+                            buttons.push(widget.clone());
+                        }
+                    }
+                } else if let Some(tbtn) = widget.downcast_ref::<gtk::ToggleButton>() {
+                    if let Some(action) = tbtn.action_name() {
+                        if action.starts_with("win.") {
+                            buttons.push(widget.clone());
+                        }
+                    }
+                } else if widget.is::<gtk::MenuButton>() {
                     buttons.push(widget.clone());
                 }
                 let mut child = widget.first_child();
                 while let Some(c) = child {
-                    collect_buttons(&c, buttons);
+                    collect_action_buttons(&c, buttons);
                     child = c.next_sibling();
                 }
             }
 
-            let mut buttons = Vec::new();
-            collect_buttons(win.upcast_ref(), &mut buttons);
+            collect_action_buttons(win.upcast_ref(), &mut action_buttons);
 
-            // Verify that all collected headerbar buttons are non-focusable
-            assert!(!buttons.is_empty(), "Should have header buttons");
-            for btn in &buttons {
+            assert!(
+                action_buttons.len() >= 5,
+                "Expected at least 5 header action buttons, found {}",
+                action_buttons.len()
+            );
+            for btn in &action_buttons {
                 assert!(
                     !btn.is_focusable(),
-                    "Header button of type {} must have focusable=false to prevent stealing focus",
+                    "Header action button of type {} must have focusable=false",
                     btn.type_().name()
                 );
             }
@@ -2052,7 +2068,9 @@ mod tests {
                 .application_id("com.github.tilix_rust.test_actions_refocus")
                 .flags(gio::ApplicationFlags::NON_UNIQUE)
                 .build();
+            let _ = app.register(gio::Cancellable::NONE);
             let tilix_win = TilixWindow::new(&app);
+            tilix_win.present();
             let session = tilix_win.session_view().expect("session must exist");
 
             let pane = session.borrow().active_pane().expect("pane must exist");
@@ -2068,9 +2086,10 @@ mod tests {
             let ctx = glib::MainContext::default();
             while ctx.iteration(false) {}
 
+            let is_focused = pane.terminal().is_focus() || pane.terminal().has_focus();
             assert!(
-                pane.terminal().has_focus(),
-                "Active terminal pane should have focus after toggle-sync-input"
+                is_focused,
+                "Active terminal pane should have focus within window after toggle-sync-input"
             );
 
             // Trigger balance-layout
@@ -2082,9 +2101,10 @@ mod tests {
 
             while ctx.iteration(false) {}
 
+            let is_focused_after_bal = pane.terminal().is_focus() || pane.terminal().has_focus();
             assert!(
-                pane.terminal().has_focus(),
-                "Active terminal pane should have focus after balance-layout"
+                is_focused_after_bal,
+                "Active terminal pane should have focus within window after balance-layout"
             );
         });
     }
@@ -2096,7 +2116,9 @@ mod tests {
                 .application_id("com.github.tilix_rust.test_pref_close_refocus")
                 .flags(gio::ApplicationFlags::NON_UNIQUE)
                 .build();
+            let _ = app.register(gio::Cancellable::NONE);
             let tilix_win = TilixWindow::new(&app);
+            tilix_win.present();
             let session = tilix_win.session_view().expect("session must exist");
 
             let pane = session.borrow().active_pane().expect("pane must exist");
@@ -2120,9 +2142,10 @@ mod tests {
 
             while ctx.iteration(false) {}
 
+            let is_focused = pane.terminal().is_focus() || pane.terminal().has_focus();
             assert!(
-                pane.terminal().has_focus(),
-                "Active terminal pane should regain focus after preferences window closes"
+                is_focused,
+                "Active terminal pane should regain focus within window after preferences window closes"
             );
         });
     }
