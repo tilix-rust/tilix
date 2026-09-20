@@ -3,3 +3,9 @@
 *.swp
 *~
 screenshots/
+
+# makepkg artifacts
+/src/
+/pkg/
+*.pkg.tar.*
+/tilix-rust-*/

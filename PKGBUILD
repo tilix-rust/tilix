@@ -11,33 +11,33 @@ depends=('gtk4' 'libadwaita' 'vte4')
 makedepends=('cargo' 'rust')
 provides=('tilix')
 conflicts=('tilix')
-source=("$pkgname-$pkgver::git+https://github.com/tilix-rust/tilix.git#tag=v$pkgver")
-sha256sums=('SKIP')
+source=()
+sha256sums=()
 
 prepare() {
-    cd "$srcdir/$pkgname-$pkgver" 2>/dev/null || cd "$srcdir/$_pkgname" 2>/dev/null || cd "$srcdir" 2>/dev/null || true
+    cd "$startdir"
     if [ -f Cargo.toml ]; then
-        cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')" || cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
+        cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')" 2>/dev/null || cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')" 2>/dev/null || true
     fi
 }
 
 build() {
-    cd "$srcdir/$pkgname-$pkgver" 2>/dev/null || cd "$srcdir/$_pkgname" 2>/dev/null || cd "$srcdir" 2>/dev/null || true
+    cd "$startdir"
     export CARGO_TARGET_DIR=target
     cargo build --release --all-targets
 }
 
 check() {
-    cd "$srcdir/$pkgname-$pkgver" 2>/dev/null || cd "$srcdir/$_pkgname" 2>/dev/null || cd "$srcdir" 2>/dev/null || true
+    cd "$startdir"
     cargo test --release
 }
 
 package() {
-    cd "$srcdir/$pkgname-$pkgver" 2>/dev/null || cd "$srcdir/$_pkgname" 2>/dev/null || cd "$srcdir" 2>/dev/null || true
+    cd "$startdir"
     
     # Binary
     install -Dm755 "target/release/tilix" "${pkgdir}/usr/bin/tilix"
-    ln -s "tilix" "${pkgdir}/usr/bin/tilix-rust"
+    ln -sf "tilix" "${pkgdir}/usr/bin/tilix-rust"
 
     # Desktop Entry
     install -Dm644 "data/com.github.tilix_rust.desktop" "${pkgdir}/usr/share/applications/com.github.tilix_rust.desktop"

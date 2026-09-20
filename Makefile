@@ -47,3 +47,4 @@ uninstall:
 
 clean:
 	cargo clean
+	rm -rf pkg src *.pkg.tar.*

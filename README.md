@@ -93,14 +93,10 @@ tilix --version
 
 ### Method 1: Arch Linux Native Package (`PKGBUILD`)
 
-The included `PKGBUILD` builds and packages Tilix with full FreeDesktop integration:
+The included `PKGBUILD` builds and packages Tilix directly from the local source tree with full FreeDesktop integration:
 
 ```bash
-# Clone the repository
-git clone https://github.com/tilix-rust/tilix.git
-cd tilix
-
-# Build and install the Arch package
+# Build and install the Arch package from the repository root
 makepkg -si
 ```
 
