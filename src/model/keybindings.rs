@@ -414,14 +414,13 @@ impl KeybindingsConfig {
     pub fn set_custom_accel(&mut self, action_id: &str, accel: impl Into<String>) {
         let accel_str = accel.into();
         let is_same_as_default = if let Some(def) = ACTION_CATALOG.iter().find(|def| def.id == action_id) {
-            if def.default_accels.is_empty() {
+            let primary = def.primary_default_accel();
+            if primary.is_empty() {
                 accel_str.trim().is_empty()
             } else {
-                def.default_accels.iter().any(|d| {
-                    accel_str == *d
-                        || (!accel_str.trim().is_empty()
-                            && normalize_accelerator(&accel_str) == normalize_accelerator(d))
-                })
+                accel_str == primary
+                    || (!accel_str.trim().is_empty()
+                        && normalize_accelerator(&accel_str) == normalize_accelerator(primary))
             }
         } else {
             false
@@ -720,5 +719,22 @@ mod tests {
         assert!(config.is_customized("win.new-tab"));
         config.set_custom_accel("win.new-tab", "<Shift><Control>t");
         assert!(!config.is_customized("win.new-tab"));
+    }
+
+    #[test]
+    fn test_custom_zoom_accel_independent_no_alias_hijack() {
+        let mut config = KeybindingsConfig::default();
+
+        // Customizing zoom-in to equal binds ONLY equal, leaving plus free for other actions
+        config.set_custom_accel("win.zoom-in", "<Primary>equal");
+        assert!(config.is_customized("win.zoom-in"));
+        assert_eq!(
+            config.get_all_effective_accels("win.zoom-in"),
+            vec!["<Primary>equal".to_string()]
+        );
+
+        // Another action can bind plus without conflict
+        let conflict = config.check_conflict("win.new-tab", "<Primary>plus");
+        assert!(conflict.is_none());
     }
 }

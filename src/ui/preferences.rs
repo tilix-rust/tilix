@@ -2930,11 +2930,20 @@ impl ShortcutCaptureDialog {
                     return glib::Propagation::Stop;
                 }
 
-                let mods = state
+                let mut mods = state
                     & (gtk::gdk::ModifierType::CONTROL_MASK
                         | gtk::gdk::ModifierType::SHIFT_MASK
                         | gtk::gdk::ModifierType::ALT_MASK
                         | gtk::gdk::ModifierType::SUPER_MASK);
+
+                // If the key produces an ASCII punctuation character (e.g. '+', '^', '<', '>', '?'),
+                // the symbol itself inherently represents the shifted character.
+                // Strip redundant Shift modifier so it displays cleanly as Ctrl++ / Ctrl+^ / Ctrl+<
+                // while strictly preserving Shift for letters (e.g. Ctrl+Shift+V) and function keys.
+                if keyval.to_unicode().map_or(false, |c| c.is_ascii_punctuation()) {
+                    mods.remove(gtk::gdk::ModifierType::SHIFT_MASK);
+                }
+
                 let raw_name = gtk::accelerator_name(keyval, mods);
                 let normalized = crate::model::keybindings::normalize_accelerator(&raw_name);
                 if !normalized.is_empty() {
