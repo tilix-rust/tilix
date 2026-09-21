@@ -715,6 +715,7 @@ impl TilixWindow {
         header_bar.pack_end(&menu_btn);
 
         let app_menu = gio::Menu::new();
+        app_menu.append(Some("Quake"), Some("win.quake-toggle"));
         app_menu.append(Some("Balance Layout"), Some("win.balance-layout"));
         app_menu.append(Some("Preferences"), Some("win.preferences"));
         app_menu.append(Some("Save Layout..."), Some("win.save-layout"));
@@ -738,6 +739,18 @@ impl TilixWindow {
             window.add_css_class("transparent-window");
         }
         WINDOW_INSTANCES.with(|wins| wins.borrow_mut().push(window.downgrade()));
+
+        let app_weak = app.downgrade();
+        window.connect_close_request(move |win| {
+            if let Some(app) = app_weak.upgrade() {
+                let is_daemon = crate::app::IS_QUAKE_DAEMON.load(std::sync::atomic::Ordering::Relaxed);
+                let has_other_visible = app.windows().iter().any(|w| w != win && w.is_visible());
+                if !has_other_visible && !is_daemon {
+                    app.quit();
+                }
+            }
+            glib::Propagation::Proceed
+        });
 
         let sessions: SessionMap = Rc::new(RefCell::new(HashMap::new()));
         let next_session_id = Rc::new(RefCell::new(1u64));
@@ -1893,7 +1906,7 @@ pub(crate) fn run_gtk_test<F: FnOnce() + Send + 'static>(f: F) {
         };
         if pool
             .push(move || {
-                let ok = gtk::init().is_ok();
+                let ok = adw::init().is_ok();
                 let _ = init_tx.send(ok);
             })
             .is_err()

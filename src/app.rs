@@ -37,6 +37,27 @@ pub fn parse_cli_args<I: IntoIterator<Item = S>, S: AsRef<str>>(args: I) -> CliA
     CliAction::NewWindow
 }
 
+pub static IS_QUAKE_DAEMON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn get_or_create_quake(
+    app: &adw::Application,
+    quake_win: &Rc<RefCell<Option<TilixQuakeWindow>>>,
+) -> TilixQuakeWindow {
+    let mut qw = quake_win.borrow_mut();
+    if let Some(ref q) = *qw {
+        if !q.is_closed() {
+            return q.clone();
+        }
+    }
+
+    // Drop the old dead window reference cleanly before allocating the new window
+    let _ = qw.take();
+
+    let q = TilixQuakeWindow::new(app);
+    *qw = Some(q.clone());
+    q
+}
+
 pub struct TilixApplication {
     app: adw::Application,
     quake_window: Rc<RefCell<Option<TilixQuakeWindow>>>,
@@ -58,13 +79,8 @@ impl TilixApplication {
             let app_weak = app.downgrade();
             action.connect_activate(move |_, _| {
                 let Some(app) = app_weak.upgrade() else { return; };
-                let mut qw = quake_win.borrow_mut();
-                if qw.is_none() {
-                    *qw = Some(TilixQuakeWindow::new(&app));
-                }
-                if let Some(ref q) = *qw {
-                    q.toggle_visibility();
-                }
+                let q = get_or_create_quake(&app, &quake_win);
+                q.toggle_visibility();
             });
             app.add_action(&action);
         }
@@ -103,22 +119,14 @@ impl TilixApplication {
                         println!("tilix 0.1.0");
                     }
                     CliAction::QuakeShow => {
-                        let mut qw = quake_win.borrow_mut();
-                        if qw.is_none() {
-                            *qw = Some(TilixQuakeWindow::new(app));
-                        }
-                        if let Some(ref q) = *qw {
-                            q.present();
-                        }
+                        IS_QUAKE_DAEMON.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let q = get_or_create_quake(app, &quake_win);
+                        q.present();
                     }
                     CliAction::QuakeToggle => {
-                        let mut qw = quake_win.borrow_mut();
-                        if qw.is_none() {
-                            *qw = Some(TilixQuakeWindow::new(app));
-                        }
-                        if let Some(ref q) = *qw {
-                            q.toggle_visibility();
-                        }
+                        IS_QUAKE_DAEMON.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let q = get_or_create_quake(app, &quake_win);
+                        q.toggle_visibility();
                     }
                     CliAction::Preferences => {
                         let on_change = move |profile: &crate::model::Profile| {
