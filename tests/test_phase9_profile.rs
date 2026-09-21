@@ -5,17 +5,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-#[path = "../src/model/mod.rs"]
-pub mod model;
-
-#[path = "../src/pty/mod.rs"]
-pub mod pty;
-
-#[path = "../src/ui/mod.rs"]
-pub mod ui;
-
-#[path = "../src/app.rs"]
-pub mod app;
+use tilix::{app, model, pty, ui};
 
 use model::config::{AppConfig, ProfileError};
 use model::layout::PaneId;
@@ -29,7 +19,38 @@ use pty::shell::{build_spawn_args, format_shell_argv0};
 use ui::preferences::TilixPreferencesWindow;
 use ui::session_view::SessionView;
 use ui::terminal_pane::TerminalPane;
-use ui::window::run_gtk_test;
+fn run_gtk_test<F: FnOnce() + Send + 'static>(f: F) {
+    static GTK_TEST_POOL: std::sync::OnceLock<Option<glib::ThreadPool>> = std::sync::OnceLock::new();
+    let pool = GTK_TEST_POOL.get_or_init(|| {
+        let (init_tx, init_rx) = std::sync::mpsc::sync_channel(1);
+        let Ok(pool) = glib::ThreadPool::exclusive(1) else {
+            return None;
+        };
+        if pool
+            .push(move || {
+                let ok = gtk4::init().is_ok();
+                let _ = init_tx.send(ok);
+            })
+            .is_err()
+        {
+            return None;
+        }
+        if init_rx.recv().unwrap_or(false) {
+            Some(pool)
+        } else {
+            None
+        }
+    });
+
+    if let Some(pool) = pool.as_ref() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let _ = pool.push(move || {
+            f();
+            let _ = tx.send(());
+        });
+        let _ = rx.recv();
+    }
+}
 use gtk4::prelude::*;
 
 #[test]

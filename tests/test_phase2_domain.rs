@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-#[path = "../src/model/mod.rs"]
-mod model;
+use tilix::model;
+
 
 use model::layout::{LayoutNode, LayoutTree, PaneId, SplitId, SplitOrientation};
 use model::profile::{CursorBlinkPreference, CursorShapePreference, Profile};

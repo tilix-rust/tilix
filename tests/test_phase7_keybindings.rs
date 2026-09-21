@@ -4,8 +4,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-#[path = "../src/model/mod.rs"]
-mod model;
+use tilix::model;
+
 
 use model::config::{AppConfig, PaneTitleStyle, WindowStyle};
 use model::keybindings::{

@@ -4,17 +4,7 @@
 use std::fs;
 use std::path::Path;
 
-#[path = "../src/model/mod.rs"]
-mod model;
-
-#[path = "../src/pty/mod.rs"]
-mod pty;
-
-#[path = "../src/ui/mod.rs"]
-mod ui;
-
-#[path = "../src/app.rs"]
-mod app;
+use tilix::{app, model, pty, ui};
 
 use app::{parse_cli_args, CliAction};
 use model::config::AppConfig;

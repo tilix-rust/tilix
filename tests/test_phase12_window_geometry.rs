@@ -2,17 +2,7 @@
 #![allow(unused_imports)]
 #![allow(deprecated)]
 
-#[path = "../src/model/mod.rs"]
-pub mod model;
-
-#[path = "../src/pty/mod.rs"]
-pub mod pty;
-
-#[path = "../src/ui/mod.rs"]
-pub mod ui;
-
-#[path = "../src/app.rs"]
-pub mod app;
+use tilix::{app, model, pty, ui};
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
@@ -28,7 +18,40 @@ use ui::geometry::{
     DEFAULT_PANE_HEADER_HEIGHT, DEFAULT_SCROLLBAR_WIDTH, DEFAULT_TAB_BAR_HEIGHT,
     DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
 };
-use ui::window::{run_gtk_test, TilixWindow};
+use ui::window::TilixWindow;
+
+fn run_gtk_test<F: FnOnce() + Send + 'static>(f: F) {
+    static GTK_TEST_POOL: std::sync::OnceLock<Option<glib::ThreadPool>> = std::sync::OnceLock::new();
+    let pool = GTK_TEST_POOL.get_or_init(|| {
+        let (init_tx, init_rx) = std::sync::mpsc::sync_channel(1);
+        let Ok(pool) = glib::ThreadPool::exclusive(1) else {
+            return None;
+        };
+        if pool
+            .push(move || {
+                let ok = gtk4::init().is_ok();
+                let _ = init_tx.send(ok);
+            })
+            .is_err()
+        {
+            return None;
+        }
+        if init_rx.recv().unwrap_or(false) {
+            Some(pool)
+        } else {
+            None
+        }
+    });
+
+    if let Some(pool) = pool.as_ref() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let _ = pool.push(move || {
+            f();
+            let _ = tx.send(());
+        });
+        let _ = rx.recv();
+    }
+}
 
 #[test]
 fn test_phase12_measure_cell_size_vte_monospace() {
