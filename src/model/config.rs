@@ -311,7 +311,11 @@ mod tests {
     fn test_app_config_test_isolation() {
         let test_dir = AppConfig::config_dir();
         let test_path = AppConfig::config_path();
-        assert!(test_dir.starts_with(std::env::temp_dir()));
+        if let Ok(override_dir) = std::env::var("TILIX_CONFIG_DIR") {
+            assert_eq!(test_dir, PathBuf::from(override_dir));
+        } else {
+            assert!(test_dir.starts_with(std::env::temp_dir()));
+        }
         assert_eq!(test_path, test_dir.join("config.json"));
         assert_ne!(test_dir, glib::user_config_dir().join("tilix"));
     }

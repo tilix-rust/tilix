@@ -396,11 +396,15 @@ fn test_phase10_advanced_tab_layout() {
 fn test_phase10_integration_test_config_isolation() {
     let test_dir = AppConfig::config_dir();
     let test_path = AppConfig::config_path();
-    assert!(
-        test_dir.starts_with(std::env::temp_dir()),
-        "Integration test config directory must reside in temp_dir, got: {:?}",
-        test_dir
-    );
+    if let Ok(override_dir) = std::env::var("TILIX_CONFIG_DIR") {
+        assert_eq!(test_dir, std::path::PathBuf::from(override_dir));
+    } else {
+        assert!(
+            test_dir.starts_with(std::env::temp_dir()),
+            "Integration test config directory must reside in temp_dir, got: {:?}",
+            test_dir
+        );
+    }
     assert_eq!(test_path, test_dir.join("config.json"));
     assert_ne!(
         test_dir,
