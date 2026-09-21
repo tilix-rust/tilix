@@ -49,17 +49,6 @@ fn run_gtk_test<F: FnOnce() + Send + 'static>(f: F) {
     }
 }
 
-trait TestConfigExt {
-    fn reset_test_config();
-}
-
-impl TestConfigExt for AppConfig {
-    fn reset_test_config() {
-        let path = Self::config_path();
-        let _ = std::fs::remove_file(&path);
-    }
-}
-
 /// Helper to recursively find all widgets of a specific type in the widget tree.
 fn find_widgets<T: IsA<gtk::Widget>>(root: &impl IsA<gtk::Widget>) -> Vec<T> {
     let mut found = Vec::new();
@@ -402,3 +391,21 @@ fn test_phase10_advanced_tab_layout() {
         assert!(find_button_by_label(root, "Edit").is_some());
     });
 }
+
+#[test]
+fn test_phase10_integration_test_config_isolation() {
+    let test_dir = AppConfig::config_dir();
+    let test_path = AppConfig::config_path();
+    assert!(
+        test_dir.starts_with(std::env::temp_dir()),
+        "Integration test config directory must reside in temp_dir, got: {:?}",
+        test_dir
+    );
+    assert_eq!(test_path, test_dir.join("config.json"));
+    assert_ne!(
+        test_dir,
+        glib::user_config_dir().join("tilix"),
+        "Integration test must NOT use the real user config directory"
+    );
+}
+

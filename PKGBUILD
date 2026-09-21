@@ -35,7 +35,11 @@ build() {
 
 check() {
     cd "$startdir"
+    export TILIX_CONFIG_DIR="$BUILDDIR/test-config"
+    export TILIX_TEST_MODE=1
+    mkdir -p "$TILIX_CONFIG_DIR"
     cargo test --release
+    rm -rf "$TILIX_CONFIG_DIR"
 }
 
 package() {

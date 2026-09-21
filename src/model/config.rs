@@ -91,17 +91,12 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn config_dir() -> PathBuf {
-        #[cfg(test)]
-        {
+        if let Ok(dir) = std::env::var("TILIX_CONFIG_DIR") {
+            PathBuf::from(dir)
+        } else if is_test_environment() {
             test_config_dir()
-        }
-        #[cfg(not(test))]
-        {
-            if let Ok(dir) = std::env::var("TILIX_CONFIG_DIR") {
-                PathBuf::from(dir)
-            } else {
-                glib::user_config_dir().join("tilix")
-            }
+        } else {
+            glib::user_config_dir().join("tilix")
         }
     }
 
@@ -114,7 +109,16 @@ impl AppConfig {
     }
 
     pub fn load() -> Self {
-        Self::load_from_path(&Self::config_path()).unwrap_or_default()
+        let path = Self::config_path();
+        match Self::load_from_path(&path) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                if path.exists() {
+                    eprintln!("Warning: Failed to load config from {}: {}", path.display(), err);
+                }
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self) -> Result<(), std::io::Error> {
@@ -248,16 +252,36 @@ impl AppConfig {
     }
 }
 
-#[cfg(test)]
 impl AppConfig {
     pub fn reset_test_config() {
-        let path = Self::config_path();
-        let _ = std::fs::remove_file(&path);
+        if is_test_environment() || std::env::var("TILIX_CONFIG_DIR").is_ok() {
+            let path = Self::config_path();
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
-#[cfg(test)]
-fn test_config_dir() -> PathBuf {
+pub fn is_test_environment() -> bool {
+    if std::env::var("TILIX_TEST_MODE").is_ok() {
+        return true;
+    }
+    if cfg!(test) {
+        return true;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let exe_str = exe.to_string_lossy();
+        if exe_str.contains("/deps/test_")
+            || exe_str.contains("/deps/tilix-")
+            || exe_str.contains("/deps/libtilix-")
+            || exe.file_name().is_some_and(|n| n.to_string_lossy().starts_with("test_"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn test_config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("TILIX_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
