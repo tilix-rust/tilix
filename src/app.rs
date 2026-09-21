@@ -51,6 +51,24 @@ impl TilixApplication {
 
         let quake_window: Rc<RefCell<Option<TilixQuakeWindow>>> = Rc::new(RefCell::new(None));
 
+        // Action: app.quake-toggle
+        {
+            let quake_win = Rc::clone(&quake_window);
+            let action = gio::SimpleAction::new("quake-toggle", None);
+            let app_weak = app.downgrade();
+            action.connect_activate(move |_, _| {
+                let Some(app) = app_weak.upgrade() else { return; };
+                let mut qw = quake_win.borrow_mut();
+                if qw.is_none() {
+                    *qw = Some(TilixQuakeWindow::new(&app));
+                }
+                if let Some(ref q) = *qw {
+                    q.toggle_visibility();
+                }
+            });
+            app.add_action(&action);
+        }
+
         app.connect_startup(|app| {
             apply_dpi_workaround();
             crate::ui::window::setup_css();

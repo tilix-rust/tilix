@@ -314,7 +314,7 @@ fn test_phase14_profile_clipboard_defaults_and_serde() {
 
 #[test]
 fn test_phase14_keybinding_catalog_clipboard_actions() {
-    assert_eq!(ACTION_CATALOG.len(), 32);
+    assert_eq!(ACTION_CATALOG.len(), 33);
     assert_eq!(ActionCategory::Clipboard.title(), "Clipboard & Edit");
 
     let clipboard_actions: Vec<_> = ACTION_CATALOG

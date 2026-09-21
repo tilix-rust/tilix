@@ -46,6 +46,17 @@ impl TilixQuakeWindow {
             glib::Propagation::Stop
         });
 
+        {
+            let win_weak = window.downgrade();
+            let action = gio::SimpleAction::new("quake-toggle", None);
+            action.connect_activate(move |_, _| {
+                if let Some(w) = win_weak.upgrade() {
+                    w.set_visible(false);
+                }
+            });
+            window.add_action(&action);
+        }
+
         let session_weak = Rc::downgrade(&session_view);
         let window_weak = window.downgrade();
         session_view.borrow().set_action_handler(move |action| {

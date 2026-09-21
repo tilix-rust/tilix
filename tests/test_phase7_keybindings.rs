@@ -15,7 +15,7 @@ use model::keybindings::{
 
 #[test]
 fn test_action_catalog_integrity_and_default_uniqueness() {
-    assert_eq!(ACTION_CATALOG.len(), 32);
+    assert_eq!(ACTION_CATALOG.len(), 33);
 
     let mut ids = std::collections::HashSet::new();
     let mut default_accel_map: std::collections::HashMap<String, &'static str> =
@@ -81,8 +81,15 @@ fn test_action_categories_and_titles() {
     assert_eq!(session_actions.len(), 14);
     assert_eq!(split_actions.len(), 4);
     assert_eq!(nav_actions.len(), 4);
-    assert_eq!(view_actions.len(), 5);
+    assert_eq!(view_actions.len(), 6);
     assert_eq!(clipboard_actions.len(), 5);
+
+    let quake_action = view_actions.iter().find(|d| d.id == "app.quake-toggle");
+    assert!(quake_action.is_some(), "app.quake-toggle must be present in View & Settings");
+    assert_eq!(
+        quake_action.unwrap().default_accels,
+        &["<Primary>grave", "F10"]
+    );
 }
 
 #[test]
@@ -312,3 +319,46 @@ fn test_minimal_footprint_reverting_to_default() {
     assert!(!config.is_customized("win.new-tab"));
     assert!(config.custom.is_empty());
 }
+
+#[test]
+fn test_quake_toggle_keybinding_customization_and_effective_accel() {
+    let mut config = KeybindingsConfig::default();
+
+    // Verify default accelerators
+    assert_eq!(
+        config.get_effective_accel("app.quake-toggle"),
+        Some("<Primary>grave".to_string())
+    );
+    assert_eq!(
+        config.get_all_effective_accels("app.quake-toggle"),
+        vec!["<Primary>grave".to_string(), "F10".to_string()]
+    );
+    assert!(!config.is_customized("app.quake-toggle"));
+
+    // Customize to F12
+    config.set_custom_accel("app.quake-toggle", "F12");
+    assert!(config.is_customized("app.quake-toggle"));
+    assert_eq!(
+        config.get_effective_accel("app.quake-toggle"),
+        Some("F12".to_string())
+    );
+    assert_eq!(
+        config.get_all_effective_accels("app.quake-toggle"),
+        vec!["F12".to_string()]
+    );
+
+    // Disable shortcut
+    config.set_custom_accel("app.quake-toggle", "");
+    assert!(config.is_customized("app.quake-toggle"));
+    assert_eq!(config.get_effective_accel("app.quake-toggle"), Some("".to_string()));
+    assert!(config.get_all_effective_accels("app.quake-toggle").is_empty());
+
+    // Reset to default
+    config.reset_action("app.quake-toggle");
+    assert!(!config.is_customized("app.quake-toggle"));
+    assert_eq!(
+        config.get_effective_accel("app.quake-toggle"),
+        Some("<Primary>grave".to_string())
+    );
+}
+

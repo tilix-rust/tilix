@@ -2502,6 +2502,40 @@ impl TilixPreferencesWindow {
             app_title_entry.connect_changed(move |_| st2());
         }
 
+        #[derive(Clone)]
+        struct ShortcutRowWidgets {
+            action_id: &'static str,
+            shortcut_label: gtk::ShortcutLabel,
+            disabled_label: gtk::Label,
+            reset_btn: gtk::Button,
+        }
+
+        let row_widgets = Rc::new(RefCell::new(Vec::<ShortcutRowWidgets>::new()));
+
+        let refresh_shortcuts_ui = {
+            let current_config = Rc::clone(&current_config);
+            let row_widgets = Rc::clone(&row_widgets);
+            Rc::new(move || {
+                let cfg = current_config.borrow();
+                for item in row_widgets.borrow().iter() {
+                    let effective = cfg
+                        .keybindings
+                        .get_effective_accel(item.action_id)
+                        .unwrap_or_default();
+                    let is_custom = cfg.keybindings.is_customized(item.action_id);
+                    if effective.trim().is_empty() {
+                        item.shortcut_label.set_visible(false);
+                        item.disabled_label.set_visible(true);
+                    } else {
+                        item.shortcut_label.set_accelerator(&effective);
+                        item.shortcut_label.set_visible(true);
+                        item.disabled_label.set_visible(false);
+                    }
+                    item.reset_btn.set_visible(is_custom);
+                }
+            })
+        };
+
         // =========================================================================
         // BEHAVIOR PAGE (Quake & Notifications)
         // =========================================================================
@@ -2530,6 +2564,93 @@ impl TilixPreferencesWindow {
         quake_unfocus_row.set_title("Hide Quake on Focus Loss");
         quake_unfocus_row.set_active(current_config.borrow().quake_hide_on_unfocus);
         quake_group.add(&quake_unfocus_row);
+
+        let quake_shortcut_row = adw::ActionRow::new();
+        quake_shortcut_row.set_title("Quake Toggle Shortcut");
+        quake_shortcut_row.set_subtitle("Shortcut to toggle Quake window (global hotkey: set system shortcut to 'tilix --quake-toggle')");
+        quake_shortcut_row.set_activatable(true);
+
+        let quake_suffix_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        quake_suffix_box.set_valign(gtk::Align::Center);
+
+        let quake_shortcut_label = gtk::ShortcutLabel::new("");
+        let quake_disabled_label = gtk::Label::new(Some("Disabled"));
+        quake_disabled_label.add_css_class("dim-label");
+
+        let quake_edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+        quake_edit_btn.set_tooltip_text(Some("Edit shortcut"));
+        quake_edit_btn.add_css_class("flat");
+
+        let quake_reset_btn = gtk::Button::from_icon_name("edit-undo-symbolic");
+        quake_reset_btn.set_tooltip_text(Some("Reset to default"));
+        quake_reset_btn.add_css_class("flat");
+
+        quake_suffix_box.append(&quake_shortcut_label);
+        quake_suffix_box.append(&quake_disabled_label);
+        quake_suffix_box.append(&quake_edit_btn);
+        quake_suffix_box.append(&quake_reset_btn);
+        quake_shortcut_row.add_suffix(&quake_suffix_box);
+        quake_group.add(&quake_shortcut_row);
+
+        row_widgets.borrow_mut().push(ShortcutRowWidgets {
+            action_id: "app.quake-toggle",
+            shortcut_label: quake_shortcut_label,
+            disabled_label: quake_disabled_label,
+            reset_btn: quake_reset_btn.clone(),
+        });
+
+        {
+            let current_config = Rc::clone(&current_config);
+            let refresh = Rc::clone(&refresh_shortcuts_ui);
+            quake_reset_btn.connect_clicked(move |_| {
+                current_config.borrow_mut().keybindings.reset_action("app.quake-toggle");
+                let _ = current_config.borrow().save();
+                crate::ui::window::apply_keybindings_globally(&current_config.borrow().keybindings);
+                refresh();
+            });
+        }
+
+        let open_quake_dialog = {
+            let win_weak = window.downgrade();
+            let current_config = Rc::clone(&current_config);
+            let refresh = Rc::clone(&refresh_shortcuts_ui);
+            move || {
+                let Some(parent_win) = win_weak.upgrade() else { return; };
+                let Some(action_def) = ACTION_CATALOG.iter().find(|d| d.id == "app.quake-toggle") else { return; };
+                let effective = current_config
+                    .borrow()
+                    .keybindings
+                    .get_effective_accel("app.quake-toggle")
+                    .unwrap_or_default();
+                let config_clone = Rc::clone(&current_config);
+                let refresh_clone = Rc::clone(&refresh);
+                let dlg = ShortcutCaptureDialog::new(
+                    &parent_win,
+                    action_def,
+                    &effective,
+                    Rc::clone(&current_config),
+                    move |new_accel| {
+                        config_clone
+                            .borrow_mut()
+                            .keybindings
+                            .set_custom_accel("app.quake-toggle", new_accel);
+                        let _ = config_clone.borrow().save();
+                        crate::ui::window::apply_keybindings_globally(&config_clone.borrow().keybindings);
+                        refresh_clone();
+                    },
+                );
+                dlg.present();
+            }
+        };
+
+        {
+            let oq = open_quake_dialog.clone();
+            quake_edit_btn.connect_clicked(move |_| oq());
+        }
+        {
+            let oq = open_quake_dialog;
+            quake_shortcut_row.connect_activated(move |_| oq());
+        }
 
         let notif_group = adw::PreferencesGroup::new();
         notif_group.set_title("Notifications");
@@ -2590,41 +2711,6 @@ impl TilixPreferencesWindow {
         shortcuts_page.set_name(Some("shortcuts"));
         shortcuts_page.set_title("Shortcuts");
         shortcuts_page.set_icon_name(Some("preferences-desktop-keyboard-shortcuts-symbolic"));
-
-        #[derive(Clone)]
-        struct ShortcutRowWidgets {
-            action_id: &'static str,
-            shortcut_label: gtk::ShortcutLabel,
-            disabled_label: gtk::Label,
-            reset_btn: gtk::Button,
-        }
-
-        let row_widgets = Rc::new(RefCell::new(Vec::<ShortcutRowWidgets>::new()));
-
-        let refresh_shortcuts_ui = {
-            let current_config = Rc::clone(&current_config);
-            let row_widgets = Rc::clone(&row_widgets);
-            Rc::new(move || {
-                let cfg = current_config.borrow();
-                for item in row_widgets.borrow().iter() {
-                    let effective = cfg
-                        .keybindings
-                        .get_effective_accel(item.action_id)
-                        .unwrap_or_default();
-                    let is_custom = cfg.keybindings.is_customized(item.action_id);
-                    if effective.trim().is_empty() {
-                        item.shortcut_label.set_visible(false);
-                        item.disabled_label.set_visible(true);
-                    } else {
-                        item.shortcut_label.set_accelerator(&effective);
-                        item.shortcut_label.set_visible(true);
-                        item.disabled_label.set_visible(false);
-                    }
-                    item.reset_btn.set_visible(is_custom);
-                }
-            })
-        };
-
         // Top Defaults Group
         let top_group = adw::PreferencesGroup::new();
         top_group.set_title("Defaults");

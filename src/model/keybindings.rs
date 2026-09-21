@@ -205,6 +205,13 @@ pub static ACTION_CATALOG: &[ActionShortcutDef] = &[
         default_accels: &["F12", "<Primary><Shift>F12"],
     },
     ActionShortcutDef {
+        id: "app.quake-toggle",
+        title: "Toggle Quake Window",
+        description: "Show or hide the Quake drop-down terminal",
+        category: ActionCategory::ViewAndSettings,
+        default_accels: &["<Primary>grave", "F10"],
+    },
+    ActionShortcutDef {
         id: "win.preferences",
         title: "Preferences",
         description: "Open application preferences dialog",
@@ -479,10 +486,10 @@ mod tests {
 
     #[test]
     fn test_action_catalog_completeness() {
-        assert_eq!(ACTION_CATALOG.len(), 32);
+        assert_eq!(ACTION_CATALOG.len(), 33);
         let ids: std::collections::HashSet<&str> =
             ACTION_CATALOG.iter().map(|d| d.id).collect();
-        assert_eq!(ids.len(), 32);
+        assert_eq!(ids.len(), 33);
         assert!(ids.contains(&"win.new-tab"));
         assert!(ids.contains(&"win.close-pane"));
         assert!(ids.contains(&"win.close-tab"));
@@ -492,6 +499,7 @@ mod tests {
         assert!(ids.contains(&"win.split-down"));
         assert!(ids.contains(&"win.balance-layout"));
         assert!(ids.contains(&"win.toggle-sync-input"));
+        assert!(ids.contains(&"app.quake-toggle"));
         assert!(ids.contains(&"win.preferences"));
         assert!(ids.contains(&"win.focus-up"));
         assert!(ids.contains(&"win.focus-down"));

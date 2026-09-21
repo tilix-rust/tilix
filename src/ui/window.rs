@@ -617,6 +617,9 @@ pub fn apply_keybindings_to_app(app: &adw::Application, keybindings: &crate::mod
         let accels = keybindings.get_all_effective_accels(def.id);
         let refs: Vec<&str> = accels.iter().map(|s| s.as_str()).collect();
         app.set_accels_for_action(def.id, &refs);
+        if def.id == "app.quake-toggle" {
+            app.set_accels_for_action("win.quake-toggle", &refs);
+        }
     }
 }
 
@@ -1353,6 +1356,20 @@ impl TilixWindow {
 
                     pref.present();
                     *holder = Some(pref);
+                }
+            });
+            self.window.add_action(&action);
+        }
+
+        // Quake Toggle
+        {
+            let action = gio::SimpleAction::new("quake-toggle", None);
+            let win_weak = self.window.downgrade();
+            action.connect_activate(move |_, _| {
+                if let Some(win) = win_weak.upgrade() {
+                    if let Some(app) = win.application() {
+                        app.activate_action("quake-toggle", None);
+                    }
                 }
             });
             self.window.add_action(&action);
