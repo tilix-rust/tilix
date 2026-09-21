@@ -1,8 +1,8 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.16.0 (Phase 16 Dual Library Architecture & Test Compilation Optimization)  
-**Date:** 2026-09-20  
+**Version:** 0.17.0 (Phase 17 Window Transparency & Container Passthrough in GTK4 / Libadwaita)  
+**Date:** 2026-09-21  
 
 
 ---
@@ -895,20 +895,50 @@ flowchart TD
         T13["test_phase13_zoom_and_alt_drag"]
         T14["test_phase14_osc52_and_clipboard"]
         T15["test_phase15_compact_mode"]
-        T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15 -.->|use tilix::{...}| LibRoot
+        T17["test_phase17_transparency"]
+        T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15 & T17 -.->|use tilix::{...}| LibRoot
     end
 ```
 
 ### 28.3 Test Suite Modernization & Compilation Deduplication
-All 14 integration test suites in `tests/` were migrated from `#[path = "..."] mod ...;` inclusions to idiomatic `use tilix::{app, model, pty, ui};` imports:
+All 15 integration test suites in `tests/` use idiomatic `use tilix::{app, model, pty, ui};` imports:
 - **Phase 2–7 Domain & Config Suites:** Pure headless test suites import `use tilix::model;` or `use tilix::{app, model, pty, ui};`, compiling against `libtilix.rlib` in <0.05s on warm rebuilds.
-- **Phase 8–15 UI & Scaffolding Suites:** Integration suites import `libtilix` modules cleanly, eliminating redundant widget tree monomorphization.
+- **Phase 8–17 UI & Scaffolding Suites:** Integration suites import `libtilix` modules cleanly, eliminating redundant widget tree monomorphization.
 
 ### 28.4 Optimization Outcomes & Benchmark Results
 - **Compilation Multiplicity:** Reduced from 15x full-codebase compilations down to **1x** (`libtilix.rlib`).
 - **Peak RAM Usage:** Lowered from **15–30+ GB** during parallel release testing to **<2.5 GB total**, completely eliminating `oom-killer` termination risks on resource-constrained systems.
 - **Incremental Test Build Time:** Dropped by **80–90%** (from tens of seconds down to sub-second link times per test suite).
-- **Zero Regressions:** 100% test pass rate preserved across all 194 unit and integration tests.
+- **Zero Regressions:** 100% test pass rate preserved across all unit and integration tests.
+
+---
+
+## 29. Phase 17 — Window Transparency & Container Passthrough in GTK4 / Libadwaita
+
+### 29.1 Architecture & The Container Passthrough Challenge
+In modern GTK4 and Libadwaita desktop environments, widgets paint via GSK (GTK Scene Kit) render nodes in hierarchical tree order. VTE4 terminal instances render their background grid cells with an alpha channel computed from `Profile.background_transparency_percent`. However, in standard Libadwaita window layouts:
+1. `adw::ApplicationWindow` paints a solid default `@window_bg_color`.
+2. `adw::ToolbarView` paints a solid container background.
+3. `adw::TabView` paints an opaque container background.
+4. Terminal pane containers (`.terminal-pane`, `gtk::Box`, `gtk::Overlay`) paint intermediate backgrounds.
+
+Without explicit container passthrough, semi-transparent terminal content simply blends into the solid gray `@window_bg_color` of the window and its intermediate containers rather than compositing against the Wayland compositor or X11 desktop background.
+
+### 29.2 Scoped `.transparent-window` CSS Architecture
+Rather than globally mutating Libadwaita container defaults (which would disrupt dialogs, settings, and other application windows), Phase 17 introduces scoped container passthrough rules under the ancestor class `.transparent-window`:
+- **Root Window Passthrough:** Overrides `window.transparent-window`, `window.transparent-window.background`, `window.transparent-window > contents`, and `window.quake-window.transparent-window` with `background-color: transparent; background: transparent;`.
+- **Intermediate Container Passthrough:** Sets transparent backgrounds on `toolbarview`, `tabview`, and their internal stack children when hosted within a `.transparent-window`.
+- **Terminal Pane Passthrough:** Sets transparent backgrounds on `.terminal-pane`, its inner box, and overlay containers.
+- **Top Chrome Readability Safeguards:** To protect usability and GNOME HIG compliance, header bars and tab bars retain solid, opaque backgrounds (`@headerbar_bg_color` and `@headerbar_fg_color`). Window buttons, split buttons, search/menu controls, and tab titles remain crisp and readable over any desktop wallpaper.
+- **Paned Separator Safeguard:** To cleanly divide adjacent panes without leaking wallpaper background through a 1px transparent slit, `window.transparent-window paned > separator` enforces a solid, opaque border color (`mix(@headerbar_bg_color, @headerbar_fg_color, 0.15)`), while preserving `@accent_color` on `:hover` and `:active`.
+
+### 29.3 Reactive Window & Quake Transparency Synchronization
+A thread-local registry `WINDOW_TRANSPARENCY_UPDATERS` manages weak references `(glib::WeakRef<adw::ApplicationWindow>, Rc<dyn Fn()>)` for all active windows (`TilixWindow` and `TilixQuakeWindow`):
+- **Lifecycle Integration:** Windows initialize `.transparent-window` based on initial profile transparency.
+- **Tab Switching Reactivity:** `tab_view.connect_selected_page_notify`, `connect_page_attached`, and `connect_page_detached` trigger transparency updates when active tabs change between transparent and opaque profiles.
+- **Global Profile Broadcasts:** `apply_profile_to_all_sessions(&profile)` invokes `apply_transparency_to_all_windows()`, dynamically adding or removing `.transparent-window` across all live windows without application restarts. Dead window references are pruned automatically on broadcast.
+- **Quake Dropdown Parity:** `TilixQuakeWindow` registers an updater with the registry and exposes `update_transparency(&self)`, achieving identical transparency behaviors.
+- **Dialog Isolation:** Preferences windows (`TilixPreferencesWindow`), shortcuts dialogs, and about dialogs never receive `.transparent-window` and remain 100% opaque Libadwaita surfaces.
 
 
 

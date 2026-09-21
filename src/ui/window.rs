@@ -20,6 +20,7 @@ use crate::ui::terminal_pane::TerminalPane;
 type SessionMap = Rc<RefCell<HashMap<adw::TabPage, Rc<RefCell<SessionView>>>>>;
 type TabReference = (glib::WeakRef<adw::TabView>, glib::WeakRef<adw::TabPage>);
 type WindowTitleUpdater = (glib::WeakRef<adw::ApplicationWindow>, Rc<dyn Fn()>);
+type WindowTransparencyUpdater = (glib::WeakRef<adw::ApplicationWindow>, Rc<dyn Fn()>);
 
 thread_local! {
     static WIDGET_TO_SESSION: RefCell<HashMap<gtk::Widget, Rc<RefCell<SessionView>>>> = RefCell::new(HashMap::new());
@@ -28,6 +29,7 @@ thread_local! {
     static WINDOW_TAB_BARS: RefCell<Vec<glib::WeakRef<adw::TabBar>>> = const { RefCell::new(Vec::new()) };
     static WINDOW_INSTANCES: RefCell<Vec<glib::WeakRef<adw::ApplicationWindow>>> = const { RefCell::new(Vec::new()) };
     static WINDOW_TITLE_UPDATERS: RefCell<Vec<WindowTitleUpdater>> = const { RefCell::new(Vec::new()) };
+    static WINDOW_TRANSPARENCY_UPDATERS: RefCell<Vec<WindowTransparencyUpdater>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn register_session_widget(widget: &gtk::Widget, session: Rc<RefCell<SessionView>>) {
@@ -120,12 +122,32 @@ pub fn detach_drag_to_new_window() -> bool {
     true
 }
 
+pub fn register_transparency_updater(window: &adw::ApplicationWindow, updater: Rc<dyn Fn()>) {
+    WINDOW_TRANSPARENCY_UPDATERS.with(|updaters| {
+        updaters.borrow_mut().push((window.downgrade(), updater));
+    });
+}
+
+pub fn apply_transparency_to_all_windows() {
+    WINDOW_TRANSPARENCY_UPDATERS.with(|updaters| {
+        updaters.borrow_mut().retain(|(win_weak, updater)| {
+            if win_weak.upgrade().is_some() {
+                updater();
+                true
+            } else {
+                false
+            }
+        });
+    });
+}
+
 pub fn apply_profile_to_all_sessions(profile: &Profile) {
     WIDGET_TO_SESSION.with(|m| {
         for session in m.borrow().values() {
             session.borrow().apply_profile(profile);
         }
     });
+    apply_transparency_to_all_windows();
 }
 
 pub fn apply_window_style_to_all_windows(style: WindowStyle) {
@@ -512,6 +534,68 @@ pub fn setup_css() {
         .compact .terminal-pane-header label {
             font-size: 0.85em;
         }
+
+        /* Window Transparency & Container Passthrough (Phase 17) */
+        window.transparent-window,
+        window.transparent-window.background,
+        window.transparent-window > contents {
+            background-color: transparent;
+            background: transparent;
+        }
+
+        window.quake-window.transparent-window,
+        window.quake-window.transparent-window.background,
+        window.quake-window.transparent-window > contents {
+            background-color: transparent;
+            background: transparent;
+        }
+
+        window.transparent-window toolbarview {
+            background-color: transparent;
+            background: transparent;
+        }
+        window.transparent-window toolbarview > stack,
+        window.transparent-window toolbarview > stack > * {
+            background-color: transparent;
+            background: transparent;
+        }
+
+        window.transparent-window tabview,
+        window.transparent-window tabview > stack,
+        window.transparent-window tabview > stack > * {
+            background-color: transparent;
+            background: transparent;
+        }
+
+        window.transparent-window .terminal-pane,
+        window.transparent-window .terminal-pane > box,
+        window.transparent-window .terminal-pane overlay {
+            background-color: transparent;
+            background: transparent;
+        }
+
+        /* Readability Safeguards: HeaderBar and TabBar must remain solid/opaque */
+        window.transparent-window headerbar,
+        window.transparent-window toolbarview > .top-bar,
+        window.transparent-window toolbarview > .top-bar headerbar {
+            background-color: @headerbar_bg_color;
+            color: @headerbar_fg_color;
+        }
+
+        window.transparent-window tabbar,
+        window.transparent-window tabbar .box,
+        window.transparent-window tabbar tabbox {
+            background-color: @headerbar_bg_color;
+        }
+
+        /* Paned Separator Safeguard: Must remain solid/opaque to cleanly divide panes */
+        window.transparent-window paned > separator {
+            background-color: mix(@headerbar_bg_color, @headerbar_fg_color, 0.15);
+        }
+        window.transparent-window paned > separator:hover,
+        window.transparent-window paned > separator:active {
+            background-color: @accent_color;
+        }
         ",
     );
     if let Some(display) = gtk::gdk::Display::default() {
@@ -647,7 +731,14 @@ impl TilixWindow {
             header_bar.add_css_class("compact");
             tab_bar.add_css_class("compact");
         }
+        if profile.background_transparency_percent > 0 {
+            window.add_css_class("transparent-window");
+        }
         WINDOW_INSTANCES.with(|wins| wins.borrow_mut().push(window.downgrade()));
+
+        let sessions: SessionMap = Rc::new(RefCell::new(HashMap::new()));
+        let next_session_id = Rc::new(RefCell::new(1u64));
+        let preferences_window: Rc<RefCell<Option<TilixPreferencesWindow>>> = Rc::new(RefCell::new(None));
 
         let win_weak = window.downgrade();
         let tv_weak = tab_view.downgrade();
@@ -663,19 +754,43 @@ impl TilixWindow {
             updaters.borrow_mut().push((window.downgrade(), Rc::clone(&update_titles)));
         });
 
+        let win_weak_trans = window.downgrade();
+        let tv_weak_trans = tab_view.downgrade();
+        let sess_trans = Rc::clone(&sessions);
+        let update_transparency: Rc<dyn Fn()> = Rc::new(move || {
+            if let (Some(w), Some(tv)) = (win_weak_trans.upgrade(), tv_weak_trans.upgrade()) {
+                let is_trans = tv.selected_page()
+                    .and_then(|p| sess_trans.borrow().get(&p).cloned())
+                    .map(|s| s.borrow().has_transparent_pane())
+                    .unwrap_or(false);
+                if is_trans {
+                    w.add_css_class("transparent-window");
+                } else {
+                    w.remove_css_class("transparent-window");
+                }
+            }
+        });
+        register_transparency_updater(&window, Rc::clone(&update_transparency));
+
         let u_sel = Rc::clone(&update_titles);
+        let u_trans_sel = Rc::clone(&update_transparency);
         tab_view.connect_selected_page_notify(move |_| {
             u_sel();
+            u_trans_sel();
         });
 
         let u_att = Rc::clone(&update_titles);
+        let u_trans_att = Rc::clone(&update_transparency);
         tab_view.connect_page_attached(move |_, _, _| {
             u_att();
+            u_trans_att();
         });
 
         let u_det = Rc::clone(&update_titles);
+        let u_trans_det = Rc::clone(&update_transparency);
         tab_view.connect_page_detached(move |_, _, _| {
             u_det();
+            u_trans_det();
         });
 
         let toolbar_view = adw::ToolbarView::new();
@@ -683,10 +798,6 @@ impl TilixWindow {
         toolbar_view.add_top_bar(&tab_bar);
         toolbar_view.set_content(Some(&tab_view));
         window.set_content(Some(&toolbar_view));
-
-        let sessions = Rc::new(RefCell::new(HashMap::new()));
-        let next_session_id = Rc::new(RefCell::new(1u64));
-        let preferences_window: Rc<RefCell<Option<TilixPreferencesWindow>>> = Rc::new(RefCell::new(None));
 
         if let Some(popover) = menu_btn.popover() {
             let tv_weak_pop = tab_view.downgrade();
@@ -877,6 +988,7 @@ impl TilixWindow {
                 u();
             }
         });
+        apply_transparency_to_all_windows();
 
         (tab_page, session_view)
     }
@@ -1035,6 +1147,7 @@ impl TilixWindow {
                 u();
             }
         });
+        apply_transparency_to_all_windows();
 
         (tab_page, session_view)
     }
@@ -1042,6 +1155,17 @@ impl TilixWindow {
     fn active_session(&self) -> Option<Rc<RefCell<SessionView>>> {
         let page = self.tab_view.selected_page()?;
         self.sessions.borrow().get(&page).cloned()
+    }
+
+    pub fn update_transparency(&self) {
+        let is_trans = self.active_session()
+            .map(|s| s.borrow().has_transparent_pane())
+            .unwrap_or(false);
+        if is_trans {
+            self.window.add_css_class("transparent-window");
+        } else {
+            self.window.remove_css_class("transparent-window");
+        }
     }
 
     fn setup_actions(&self) {
@@ -1738,6 +1862,7 @@ impl TilixWindow {
         for session in self.sessions.borrow().values() {
             session.borrow().apply_profile(profile);
         }
+        self.update_transparency();
     }
 }
 

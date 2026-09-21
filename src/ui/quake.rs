@@ -22,8 +22,24 @@ impl TilixQuakeWindow {
         window.set_default_size(1200, 400);
 
         let session_view = Rc::new(RefCell::new(SessionView::new()));
+        if session_view.borrow().has_transparent_pane() {
+            window.add_css_class("transparent-window");
+        }
         window.set_content(Some(session_view.borrow().widget()));
         crate::ui::window::register_session_widget(session_view.borrow().widget(), Rc::clone(&session_view));
+
+        let win_weak_trans = window.downgrade();
+        let sess_weak_trans = Rc::downgrade(&session_view);
+        let update_trans: Rc<dyn Fn()> = Rc::new(move || {
+            if let (Some(w), Some(s)) = (win_weak_trans.upgrade(), sess_weak_trans.upgrade()) {
+                if s.borrow().has_transparent_pane() {
+                    w.add_css_class("transparent-window");
+                } else {
+                    w.remove_css_class("transparent-window");
+                }
+            }
+        });
+        crate::ui::window::register_transparency_updater(&window, update_trans);
 
         window.connect_close_request(|win| {
             win.set_visible(false);
@@ -92,6 +108,14 @@ impl TilixQuakeWindow {
             self.hide();
         } else {
             self.present();
+        }
+    }
+
+    pub fn update_transparency(&self) {
+        if self.session_view.borrow().has_transparent_pane() {
+            self.window.add_css_class("transparent-window");
+        } else {
+            self.window.remove_css_class("transparent-window");
         }
     }
 }

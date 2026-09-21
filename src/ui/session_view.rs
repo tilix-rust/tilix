@@ -1615,6 +1615,10 @@ impl SessionView {
         );
         self.update_pane_headers_visibility();
     }
+
+    pub fn has_transparent_pane(&self) -> bool {
+        self.panes.borrow().values().any(|p| p.is_transparent())
+    }
 }
 
 impl Default for SessionView {

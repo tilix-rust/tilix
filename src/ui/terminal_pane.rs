@@ -1127,6 +1127,10 @@ impl TerminalPane {
         self.current_profile.borrow().clone()
     }
 
+    pub fn is_transparent(&self) -> bool {
+        self.current_profile.borrow().background_transparency_percent > 0
+    }
+
     pub fn pane_id(&self) -> PaneId {
         self.pane_id
     }
