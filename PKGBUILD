@@ -1,7 +1,7 @@
 # Maintainer: Tilix Rust Team <tilix@example.com>
 pkgname=tilix-rust
 _pkgname=tilix
-pkgver=0.16.0
+pkgver=0.16.1
 pkgrel=1
 pkgdesc="A tiling terminal emulator for Linux using GTK4, Libadwaita and Rust"
 arch=('x86_64' 'aarch64')
