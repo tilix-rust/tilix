@@ -208,6 +208,10 @@ pub fn matches_switch_rule(rule: &ProfileSwitchRule, hostname: &str, directory: 
     false
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
@@ -265,6 +269,8 @@ pub struct Profile {
     pub delete_binding: EraseBindingPreference,
     pub encoding: String,
     pub cjk_utf8_ambiguous_width: CjkWidthPreference,
+    #[serde(default = "default_true")]
+    pub allow_hyperlinks: bool,
 
     // Badge Tab
     pub badge_text: String,
@@ -343,6 +349,7 @@ impl Default for Profile {
             delete_binding: EraseBindingPreference::Auto,
             encoding: "UTF-8".into(),
             cjk_utf8_ambiguous_width: CjkWidthPreference::Narrow,
+            allow_hyperlinks: true,
 
             // Badge Tab
             badge_text: String::new(),
@@ -428,6 +435,7 @@ mod tests {
         assert_eq!(p.delete_binding, EraseBindingPreference::Auto);
         assert_eq!(p.encoding, "UTF-8");
         assert_eq!(p.cjk_utf8_ambiguous_width, CjkWidthPreference::Narrow);
+        assert!(p.allow_hyperlinks);
         assert!(p.badge_text.is_empty());
         assert_eq!(p.badge_position, BadgePosition::Northeast);
         assert!(!p.badge_color_set);
@@ -439,6 +447,41 @@ mod tests {
         assert!(p.triggers.is_empty());
         assert!(!p.notify_silence_enabled);
         assert_eq!(p.notify_silence_threshold, 10);
+    }
+
+    #[test]
+    fn test_profile_allow_hyperlinks_default() {
+        let profile = Profile::default();
+        assert!(profile.allow_hyperlinks);
+    }
+
+    #[test]
+    fn test_profile_allow_hyperlinks_serde_backward_compat() {
+        let legacy_json = r#"{
+            "id": "legacy_compat",
+            "name": "Legacy Compatibility Profile"
+        }"#;
+        let deserialized: Profile = serde_json::from_str(legacy_json).expect("legacy JSON without allow_hyperlinks must deserialize");
+        assert!(deserialized.allow_hyperlinks);
+    }
+
+    #[test]
+    fn test_profile_allow_hyperlinks_serde_roundtrip() {
+        let prof_false = Profile {
+            allow_hyperlinks: false,
+            ..Default::default()
+        };
+        let json_false = serde_json::to_string(&prof_false).expect("serialization of allow_hyperlinks=false should succeed");
+        let deserialized_false: Profile = serde_json::from_str(&json_false).expect("deserialization of allow_hyperlinks=false should succeed");
+        assert!(!deserialized_false.allow_hyperlinks);
+
+        let prof_true = Profile {
+            allow_hyperlinks: true,
+            ..Default::default()
+        };
+        let json_true = serde_json::to_string(&prof_true).expect("serialization of allow_hyperlinks=true should succeed");
+        let deserialized_true: Profile = serde_json::from_str(&json_true).expect("deserialization of allow_hyperlinks=true should succeed");
+        assert!(deserialized_true.allow_hyperlinks);
     }
 
     #[test]

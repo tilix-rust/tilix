@@ -1091,6 +1091,15 @@ impl TilixPreferencesWindow {
         ));
         compat_grid.attach(&osc52_query_check, 1, 5, 1, 1);
 
+        let hyperlink_row = adw::SwitchRow::new();
+        hyperlink_row.set_title("Allow hyperlinks (OSC 8)");
+        hyperlink_row.set_subtitle("Enable support for explicit OSC 8 terminal hyperlinks");
+        hyperlink_row.set_active(true);
+
+        let hyperlink_group = adw::PreferencesGroup::new();
+        hyperlink_group.add(&hyperlink_row);
+        compat_grid.attach(&hyperlink_group, 0, 6, 2, 1);
+
         let compat_scrolled = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
@@ -1393,6 +1402,7 @@ impl TilixPreferencesWindow {
             let copy_on_select_r = copy_on_select_check.clone();
             let osc52_r = osc52_check.clone();
             let osc52_query_r = osc52_query_check.clone();
+            let hyperlink_r = hyperlink_row.clone();
             let refresh_rules = Rc::clone(&refresh_rules_list);
 
             Rc::new(move |p: &Profile| {
@@ -1562,6 +1572,7 @@ impl TilixPreferencesWindow {
                 copy_on_select_r.set_active(p.copy_on_select);
                 osc52_r.set_active(p.enable_osc52);
                 osc52_query_r.set_active(p.osc52_allow_query);
+                hyperlink_r.set_active(p.allow_hyperlinks);
 
                 refresh_rules();
 
@@ -1684,6 +1695,7 @@ impl TilixPreferencesWindow {
             let copy_on_select_r = copy_on_select_check.clone();
             let osc52_r = osc52_check.clone();
             let osc52_query_r = osc52_query_check.clone();
+            let hyperlink_r = hyperlink_row.clone();
 
             Rc::new(move || {
                 if is_populating.get() {
@@ -1812,6 +1824,7 @@ impl TilixPreferencesWindow {
                 prof.copy_on_select = copy_on_select_r.is_active();
                 prof.enable_osc52 = osc52_r.is_active();
                 prof.osc52_allow_query = osc52_query_r.is_active();
+                prof.allow_hyperlinks = hyperlink_r.is_active();
 
                 let updated = prof.clone();
                 if updated.id == cfg.default_profile_id {
@@ -2257,6 +2270,7 @@ impl TilixPreferencesWindow {
         connect_sync!(copy_on_select_check, notify_active);
         connect_sync!(osc52_check, notify_active);
         connect_sync!(osc52_query_check, notify_active);
+        connect_sync!(hyperlink_row, notify_active);
 
         // Action button callbacks: Add Profile
         {
@@ -3035,7 +3049,7 @@ impl ShortcutCaptureDialog {
                 // the symbol itself inherently represents the shifted character.
                 // Strip redundant Shift modifier so it displays cleanly as Ctrl++ / Ctrl+^ / Ctrl+<
                 // while strictly preserving Shift for letters (e.g. Ctrl+Shift+V) and function keys.
-                if keyval.to_unicode().map_or(false, |c| c.is_ascii_punctuation()) {
+                if keyval.to_unicode().is_some_and(|c| c.is_ascii_punctuation()) {
                     mods.remove(gtk::gdk::ModifierType::SHIFT_MASK);
                 }
 

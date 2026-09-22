@@ -1,8 +1,8 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.17.0 (Phase 17 Window Transparency & Container Passthrough in GTK4 / Libadwaita)  
-**Date:** 2026-09-21  
+**Version:** 0.18.0 (Phase 18 OSC 8 Hyperlinks & Upstream Parity)  
+**Date:** 2026-09-22  
 
 
 ---
@@ -896,14 +896,15 @@ flowchart TD
         T14["test_phase14_osc52_and_clipboard"]
         T15["test_phase15_compact_mode"]
         T17["test_phase17_transparency"]
-        T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15 & T17 -.->|use tilix::{...}| LibRoot
+        T18["test_phase18_osc8_hyperlinks"]
+        T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12 & T13 & T14 & T15 & T17 & T18 -.->|use tilix::{...}| LibRoot
     end
 ```
 
 ### 28.3 Test Suite Modernization & Compilation Deduplication
-All 15 integration test suites in `tests/` use idiomatic `use tilix::{app, model, pty, ui};` imports:
+All 16 integration test suites in `tests/` use idiomatic `use tilix::{app, model, pty, ui};` imports:
 - **Phase 2–7 Domain & Config Suites:** Pure headless test suites import `use tilix::model;` or `use tilix::{app, model, pty, ui};`, compiling against `libtilix.rlib` in <0.05s on warm rebuilds.
-- **Phase 8–17 UI & Scaffolding Suites:** Integration suites import `libtilix` modules cleanly, eliminating redundant widget tree monomorphization.
+- **Phase 8–18 UI & Scaffolding Suites:** Integration suites import `libtilix` modules cleanly, eliminating redundant widget tree monomorphization.
 
 ### 28.4 Optimization Outcomes & Benchmark Results
 - **Compilation Multiplicity:** Reduced from 15x full-codebase compilations down to **1x** (`libtilix.rlib`).
@@ -939,6 +940,39 @@ A thread-local registry `WINDOW_TRANSPARENCY_UPDATERS` manages weak references `
 - **Global Profile Broadcasts:** `apply_profile_to_all_sessions(&profile)` invokes `apply_transparency_to_all_windows()`, dynamically adding or removing `.transparent-window` across all live windows without application restarts. Dead window references are pruned automatically on broadcast.
 - **Quake Dropdown Parity:** `TilixQuakeWindow` registers an updater with the registry and exposes `update_transparency(&self)`, achieving identical transparency behaviors.
 - **Dialog Isolation:** Preferences windows (`TilixPreferencesWindow`), shortcuts dialogs, and about dialogs never receive `.transparent-window` and remain 100% opaque Libadwaita surfaces.
+
+---
+
+## 30. Phase 18 — OSC 8 Hyperlinks & Upstream Parity
+
+### 30.1 Operating System Command (OSC) 8 Architecture
+Operating System Command (OSC) 8 defines an explicit hyperlink escape sequence protocol for terminal emulators: `\x1b]8;params;URI\x1b\\text\x1b]8;;\x1b\\`. Unlike heuristic regex-based pattern matching (which attempts to detect URL strings in raw terminal text), OSC 8 provides true HTML anchor semantics: terminal applications can display arbitrary label text while pointing to a distinct destination URI. Gerald Nunn's original upstream Tilix terminal emulator integrated OSC 8 hyperlinks with security gating, pointer gestures, and dynamic context menus. Phase 18 establishes complete upstream parity for OSC 8 in Rust Tilix.
+
+### 30.2 Domain Model & Serde Compatibility
+The `Profile` domain entity (`src/model/profile.rs`) adds:
+- `pub allow_hyperlinks: bool` (defaulting to `true` via `#[serde(default = "default_true")]`).
+- Legacy JSON profiles lacking the `"allow_hyperlinks"` key deserialize seamlessly with `allow_hyperlinks = true`, preserving backward compatibility across all previous phases.
+
+### 30.3 Pointer Activation & GTK4 Gesture Interception
+In GTK4, internal VTE event handling would ordinarily capture left-clicks for cursor placement or text selection. To achieve frictionless hyperlink activation:
+- A `gtk::GestureClick` controller configured with `PropagationPhase::Capture` is attached directly to the `vte4::Terminal` widget.
+- **Ctrl + Left-Click (Primary Button):** Intercepts the click, queries `terminal.check_hyperlink_at(x, y)`, and if present, safely launches the URI via `gio::AppInfo::launch_default_for_uri()`. Crucially, the gesture sequence is claimed (`EventSequenceState::Claimed`), preventing VTE from creating accidental text selections or repositioning the cursor.
+- **Right-Click (Secondary Button):** Checks `terminal.check_hyperlink_at(x, y)`. When a hyperlink is under the pointer, the active URI is recorded in `current_hyperlink_uri` and a dynamic context menu containing **"Open Link"** (`win.open-link`) and **"Copy Link Address"** (`win.copy-link-address`) is set on the terminal. When right-clicking elsewhere, `current_hyperlink_uri` is cleared and the standard base context menu is restored.
+
+### 30.4 Upstream Security Gating for `file://` URIs
+To prevent remote execution vulnerabilities, SMB credential harvesting, or arbitrary remote file access:
+- Modular verification in `TerminalPane::is_safe_file_uri(uri)` inspects all `file://` URIs.
+- Local paths (`file:///path`) and loopback URIs (`file://localhost/path`) are permitted.
+- Host-addressed URIs (`file://<hostname>/path`) are permitted strictly if `<hostname>` matches `glib::host_name()`.
+- Remote hosts and SMB shares (e.g. `file://attacker.com/payload.sh` or `file://smb-server/share`) are strictly blocked, logging a security warning. Non-file URIs (`https://`, `mailto:`, etc.) pass through to the desktop GIO launcher.
+
+### 30.5 Dynamic Context Menu & Window Action Dispatch
+- Window actions `win.open-link` and `win.copy-link-address` are registered on `TilixWindow`, dispatching through `SessionView::open_link_active()` and `SessionView::copy_link_address_active()` to the active `TerminalPane`.
+- `TerminalPane::open_link()` executes safe launching for the stored URI, while `TerminalPane::copy_link_address()` populates the GDK clipboard.
+
+### 30.6 Profile Compatibility Preferences Integration
+The Profile Preferences editor (`src/ui/preferences.rs`) under the Compatibility tab adds an `adw::SwitchRow` for **"Allow hyperlinks (OSC 8)"**, synchronizing changes reactively to the running session panes via `apply_profile()` and `vte_terminal_set_allow_hyperlink()`.
+
 
 
 

@@ -393,6 +393,7 @@ impl SessionView {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_pane(
         id: PaneId,
         initial_directory: Option<&Path>,
@@ -555,6 +556,18 @@ impl SessionView {
     pub fn select_all_active(&self) {
         if let Some(pane) = self.active_pane() {
             pane.select_all();
+        }
+    }
+
+    pub fn open_link_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.open_link();
+        }
+    }
+
+    pub fn copy_link_address_active(&self) {
+        if let Some(pane) = self.active_pane() {
+            pane.copy_link_address();
         }
     }
 

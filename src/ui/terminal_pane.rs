@@ -98,6 +98,7 @@ pub struct TerminalPane {
     child_pid: Rc<Cell<Option<i32>>>,
     current_directory: Rc<RefCell<Option<PathBuf>>>,
     current_profile: Rc<RefCell<Profile>>,
+    current_hyperlink_uri: Rc<RefCell<Option<String>>>,
     pty_proxy: Rc<RefCell<Option<std::sync::Arc<crate::pty::PtyProxy>>>>,
     process_guard: Rc<ChildProcessGuard>,
     is_sync_enabled: Rc<Cell<bool>>,
@@ -263,6 +264,8 @@ impl TerminalPane {
         let default_cols = current_profile.borrow().default_size_columns.max(1) as i64;
         let default_rows = current_profile.borrow().default_size_rows.max(1) as i64;
         terminal.set_size(default_cols, default_rows);
+        terminal.set_allow_hyperlink(current_profile.borrow().allow_hyperlinks);
+        let current_hyperlink_uri: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         let initial_formatted_title = Self::format_pane_title(
             &current_profile.borrow(),
@@ -540,34 +543,41 @@ impl TerminalPane {
         }
 
         // Setup terminal context menu
-        let menu = gio::Menu::new();
+        terminal.set_context_menu_model(Some(&Self::build_context_menu(false)));
 
-        // Section 1: Clipboard
-        let clip_section = gio::Menu::new();
-        clip_section.append(Some("Copy"), Some("win.copy"));
-        clip_section.append(Some("Copy as HTML"), Some("win.copy-html"));
-        clip_section.append(Some("Paste"), Some("win.paste"));
-        clip_section.append(Some("Paste Primary Selection"), Some("win.paste-primary"));
-        menu.append_section(None, &clip_section);
+        // Wire click gesture for Ctrl+Left-Click (launch hyperlink) and Right-Click (dynamic context menu)
+        {
+            let click_gesture = gtk::GestureClick::new();
+            click_gesture.set_button(0); // Listen to all mouse buttons
+            click_gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
 
-        // Section 2: Selection
-        let sel_section = gio::Menu::new();
-        sel_section.append(Some("Select All"), Some("win.select-all"));
-        menu.append_section(None, &sel_section);
+            let term_ref = terminal.clone();
+            let uri_holder = Rc::clone(&current_hyperlink_uri);
 
-        // Section 3: Splits
-        let split_section = gio::Menu::new();
-        split_section.append(Some("Split Right"), Some("win.split-right"));
-        split_section.append(Some("Split Down"), Some("win.split-down"));
-        split_section.append(Some("Close Terminal"), Some("win.close-pane"));
-        menu.append_section(None, &split_section);
+            click_gesture.connect_pressed(move |gesture, _n, x, y| {
+                let btn = gesture.current_button();
+                let state = gesture.current_event_state();
 
-        // Section 4: Preferences
-        let pref_section = gio::Menu::new();
-        pref_section.append(Some("Preferences..."), Some("win.preferences"));
-        menu.append_section(None, &pref_section);
-
-        terminal.set_context_menu_model(Some(&menu));
+                if btn == gtk::gdk::BUTTON_PRIMARY && state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                    if let Some(uri) = term_ref.check_hyperlink_at(x, y) {
+                        let uri_str = uri.to_string();
+                        Self::launch_uri_safe(&uri_str);
+                        gesture.set_state(gtk::EventSequenceState::Claimed);
+                    }
+                } else if btn == gtk::gdk::BUTTON_SECONDARY {
+                    if let Some(uri) = term_ref.check_hyperlink_at(x, y) {
+                        *uri_holder.borrow_mut() = Some(uri.to_string());
+                        let menu = Self::build_context_menu(true);
+                        term_ref.set_context_menu_model(Some(&menu));
+                    } else {
+                        *uri_holder.borrow_mut() = None;
+                        let menu = Self::build_context_menu(false);
+                        term_ref.set_context_menu_model(Some(&menu));
+                    }
+                }
+            });
+            terminal.add_controller(click_gesture);
+        }
 
         // Connect copy-on-select
         let profile_copy_select = Rc::clone(&current_profile);
@@ -716,6 +726,7 @@ impl TerminalPane {
             child_pid,
             current_directory,
             current_profile,
+            current_hyperlink_uri,
             pty_proxy,
             process_guard,
             is_sync_enabled,
@@ -1319,6 +1330,97 @@ impl TerminalPane {
         self.terminal.context_menu_model()
     }
 
+    pub fn is_safe_file_uri(uri: &str) -> bool {
+        let lower = uri.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("file://") {
+            if rest.starts_with('/') {
+                // file:///path -> host is empty -> local file
+                return true;
+            }
+            let host = match rest.find('/') {
+                Some(idx) => &rest[..idx],
+                None => rest,
+            };
+            if host.is_empty() || host == "localhost" {
+                return true;
+            }
+            let local_host = glib::host_name().to_string().to_ascii_lowercase();
+            if host == local_host {
+                return true;
+            }
+            // Remote file URI detected - blocked for security
+            return false;
+        }
+        true
+    }
+
+    pub fn launch_uri_safe(uri: &str) -> bool {
+        if !Self::is_safe_file_uri(uri) {
+            eprintln!("Blocked unsafe remote file URI: {}", uri);
+            return false;
+        }
+        let res = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
+        res.is_ok()
+    }
+
+    pub fn build_context_menu(has_link: bool) -> gio::Menu {
+        let menu = gio::Menu::new();
+
+        if has_link {
+            let link_section = gio::Menu::new();
+            link_section.append(Some("Open Link"), Some("win.open-link"));
+            link_section.append(Some("Copy Link Address"), Some("win.copy-link-address"));
+            menu.append_section(None, &link_section);
+        }
+
+        let clip_section = gio::Menu::new();
+        clip_section.append(Some("Copy"), Some("win.copy"));
+        clip_section.append(Some("Copy as HTML"), Some("win.copy-html"));
+        clip_section.append(Some("Paste"), Some("win.paste"));
+        clip_section.append(Some("Paste Primary Selection"), Some("win.paste-primary"));
+        menu.append_section(None, &clip_section);
+
+        let sel_section = gio::Menu::new();
+        sel_section.append(Some("Select All"), Some("win.select-all"));
+        menu.append_section(None, &sel_section);
+
+        let split_section = gio::Menu::new();
+        split_section.append(Some("Split Right"), Some("win.split-right"));
+        split_section.append(Some("Split Down"), Some("win.split-down"));
+        split_section.append(Some("Close Terminal"), Some("win.close-pane"));
+        menu.append_section(None, &split_section);
+
+        let pref_section = gio::Menu::new();
+        pref_section.append(Some("Preferences..."), Some("win.preferences"));
+        menu.append_section(None, &pref_section);
+
+        menu
+    }
+
+    pub fn allows_hyperlink(&self) -> bool {
+        self.terminal.allows_hyperlink()
+    }
+
+    pub fn current_hyperlink_uri(&self) -> Option<String> {
+        self.current_hyperlink_uri.borrow().clone()
+    }
+
+    pub fn set_current_hyperlink_uri(&self, uri: Option<String>) {
+        *self.current_hyperlink_uri.borrow_mut() = uri;
+    }
+
+    pub fn open_link(&self) {
+        if let Some(ref uri) = *self.current_hyperlink_uri.borrow() {
+            Self::launch_uri_safe(uri);
+        }
+    }
+
+    pub fn copy_link_address(&self) {
+        if let Some(ref uri) = *self.current_hyperlink_uri.borrow() {
+            self.terminal.display().clipboard().set_text(uri);
+        }
+    }
+
     pub fn pty_proxy(&self) -> Option<std::sync::Arc<crate::pty::PtyProxy>> {
         self.pty_proxy.borrow().clone()
     }
@@ -1525,6 +1627,7 @@ impl TerminalPane {
         widgets.terminal.set_delete_binding(profile.delete_binding.into());
         widgets.terminal.set_cjk_ambiguous_width(profile.cjk_utf8_ambiguous_width.to_width());
         widgets.terminal.set_word_char_exceptions(&profile.select_by_word_chars);
+        widgets.terminal.set_allow_hyperlink(profile.allow_hyperlinks);
 
         // Margin guide line
         widgets.margin_line.set_visible(profile.draw_margin > 0);

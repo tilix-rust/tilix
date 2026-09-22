@@ -1857,6 +1857,38 @@ impl TilixWindow {
             });
             self.window.add_action(&action);
         }
+
+        // Open Link
+        {
+            let action = gio::SimpleAction::new("open-link", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().open_link_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
+
+        // Copy Link Address
+        {
+            let action = gio::SimpleAction::new("copy-link-address", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().copy_link_address_active();
+                }
+            });
+            self.window.add_action(&action);
+        }
     }
 
     pub fn window(&self) -> &adw::ApplicationWindow {
