@@ -1028,8 +1028,8 @@ impl SessionView {
     fn is_point_on_paned_handle(p: &gtk::Paned, x: f64, y: f64) -> bool {
         let pos = p.position() as f64;
         let near_pos = match p.orientation() {
-            gtk::Orientation::Horizontal => (x - pos).abs() <= 10.0,
-            gtk::Orientation::Vertical => (y - pos).abs() <= 10.0,
+            gtk::Orientation::Horizontal => (x - pos).abs() <= 6.0,
+            gtk::Orientation::Vertical => (y - pos).abs() <= 6.0,
             _ => false,
         };
         if let Some(w) = p.pick(x, y, gtk::PickFlags::DEFAULT) {
@@ -2163,10 +2163,10 @@ mod tests {
             }
             let click = click_opt.expect("GestureClick must be attached to paned");
 
-            // Clicking away from separator (x=10.0 in left pane) with n_press=2 should NOT equalize
+            // Clicking away from separator (x=6.0 in left pane) with n_press=2 should NOT equalize
             use glib::prelude::*;
-            click.emit_by_name::<()>("pressed", &[&2i32, &10.0f64, &100.0f64]);
-            click.emit_by_name::<()>("released", &[&2i32, &10.0f64, &100.0f64]);
+            click.emit_by_name::<()>("pressed", &[&2i32, &6.0f64, &100.0f64]);
+            click.emit_by_name::<()>("released", &[&2i32, &6.0f64, &100.0f64]);
             for _ in 0..5 {
                 ctx.iteration(false);
             }
