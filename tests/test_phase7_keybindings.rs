@@ -15,7 +15,7 @@ use model::keybindings::{
 
 #[test]
 fn test_action_catalog_integrity_and_default_uniqueness() {
-    assert_eq!(ACTION_CATALOG.len(), 33);
+    assert_eq!(ACTION_CATALOG.len(), 34);
 
     let mut ids = std::collections::HashSet::new();
     let mut default_accel_map: std::collections::HashMap<String, &'static str> =
@@ -79,10 +79,17 @@ fn test_action_categories_and_titles() {
         .collect();
 
     assert_eq!(session_actions.len(), 14);
-    assert_eq!(split_actions.len(), 4);
+    assert_eq!(split_actions.len(), 5);
     assert_eq!(nav_actions.len(), 4);
     assert_eq!(view_actions.len(), 6);
     assert_eq!(clipboard_actions.len(), 5);
+
+    let maximize_action = split_actions.iter().find(|d| d.id == "win.terminal-maximize");
+    assert!(maximize_action.is_some(), "win.terminal-maximize must be present in Splits & Layout");
+    assert_eq!(
+        maximize_action.unwrap().default_accels,
+        &["<Primary><Shift>x", "<Alt>m"]
+    );
 
     let quake_action = view_actions.iter().find(|d| d.id == "app.quake-toggle");
     assert!(quake_action.is_some(), "app.quake-toggle must be present in View & Settings");

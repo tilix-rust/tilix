@@ -1,8 +1,8 @@
 # Tilix Rust Architecture Overview
 
 **Status:** Living Architecture Document  
-**Version:** 0.18.0 (Phase 18 OSC 8 Hyperlinks & Upstream Parity)  
-**Date:** 2026-09-22  
+**Version:** 0.19.0 (Phase 19 Terminal Pane Maximize Toggle & Upstream Parity)  
+**Date:** 2026-10-24  
 
 
 ---
@@ -972,6 +972,52 @@ To prevent remote execution vulnerabilities, SMB credential harvesting, or arbit
 
 ### 30.6 Profile Compatibility Preferences Integration
 The Profile Preferences editor (`src/ui/preferences.rs`) under the Compatibility tab adds an `adw::SwitchRow` for **"Allow hyperlinks (OSC 8)"**, synchronizing changes reactively to the running session panes via `apply_profile()` and `vte_terminal_set_allow_hyperlink()`.
+
+---
+
+## 31. Phase 19 — Terminal Pane Maximize Toggle & Upstream Parity
+
+### 31.1 Motivation & Upstream Alignment
+In complex tiling arrangements involving 3 or more terminal panes, power users frequently require temporary fullscreen expansion of a single terminal—for monitoring detailed log streams, running wide curses/TUI tools (`htop`, `neovim`, `k9s`), or viewing wide tabular outputs. In Gerald Nunn's original upstream Tilix (D/GTK3), this capability was provided via terminal pane maximization with dedicated keyboard shortcuts (`Ctrl+Shift+X` and `Alt+M`), pane header controls, header double-click gestures, and context menu options. Phase 19 brings complete architectural parity to Tilix Rust.
+
+### 31.2 Headless Domain Model Maximize State
+In `src/model/session.rs`, `SessionModel` tracks maximization as a pure domain property:
+- `pub maximized_pane: Option<PaneId>`: records which pane (if any) currently monopolizes the tab viewport.
+- `is_maximized(&self) -> bool`: returns whether a pane is currently maximized.
+- `maximized_pane(&self) -> Option<PaneId>`: returns the maximized pane ID.
+- `toggle_maximize(&mut self, target: Option<PaneId>) -> bool`: validates the single-pane invariant (`panes().len() <= 1` is a no-op returning `false`), toggles off if target is already maximized, switches to target if another pane was maximized, or maximizes the target/active pane.
+- `unmaximize(&mut self) -> bool`: resets `maximized_pane = None`.
+- **Auto-Unmaximize Invariants:** To prevent orphaned or inconsistent view states, `remove_pane` auto-unmaximizes when the closed pane was maximized or remaining pane count drops to 1. `split_pane`, `dock_pane`, and `adopt_pane` automatically reset `maximized_pane = None` before executing layout transformations so new panes are immediately visible.
+
+### 31.3 Keybindings & Action Catalog
+`ACTION_CATALOG` in `src/model/keybindings.rs` adds `win.terminal-maximize` to `ActionCategory::SplitsAndLayout`:
+- ID: `"win.terminal-maximize"`
+- Title: `"Maximize Terminal"`
+- Description: `"Toggle maximize active terminal pane"`
+- Default Accelerators: `&["<Primary><Shift>x", "<Alt>m"]`
+- Total action catalog size expands from 33 to 34, and `SplitsAndLayout` actions expand from 4 to 5 with zero keybinding collisions.
+
+### 31.4 Terminal Pane UI & Header Controls
+In `src/ui/terminal_pane.rs`:
+- Dedicated maximize button (`maximize_btn`) placed in the pane header immediately before `close_btn`.
+- Dynamic icon and tooltip state: displays `"view-fullscreen-symbolic"` with tooltip `"Maximize Terminal (Ctrl+Shift+X, Alt+M)"` when unmaximized; transforms to `"view-restore-symbolic"` with tooltip `"Restore Terminal (Ctrl+Shift+X, Alt+M)"` and `.maximized` CSS class when maximized.
+- Header double-click gesture: a `gtk::GestureClick` controller attached to `header` intercepts double-clicks (`n == 2`) on the primary mouse button, dispatching to `maximize_callbacks`.
+- Context menu: `"Maximize Terminal"` (`win.terminal-maximize`) is appended to the split actions section in `build_context_menu`.
+
+### 31.5 Session Projection Bypass & Split Ratio Invariance
+In `src/ui/session_view.rs`:
+- **Ratio Guarding:** `rebuild_projection_with` and `capture_layout_ratios` guard against ratio capture when `model.is_maximized()` is active. This prevents GTK from corrupting or flattening `GtkPaned` split proportions while a single pane occupies the container.
+- **Direct Container Attachment:** When `model.maximized_pane` is `Some(id)`, `rebuild_projection_with` bypasses `Paned` tree construction and attaches the target `TerminalPane` directly to `container` (`vexpand = true, hexpand = true`). Peer panes remain kept in memory and their background child processes continue executing without interruption.
+- **Restore Reconstruction:** When unmaximizing, `rebuild_projection_with` re-evaluates the layout root and reconstructs the `Paned` hierarchy, accurately restoring exact user-configured split ratios.
+- **Header Visibility & Sensitivity:** When maximized, headers remain visible unless `PaneTitleStyle::None`. Maximize buttons are sensitive whenever `pane_count > 1 || is_maximized`.
+
+### 31.6 Window Action Dispatch & Quake Integration
+In `src/ui/window.rs` and `src/ui/quake.rs`:
+- `win.terminal-maximize` is registered on `TilixWindow` and `TilixQuakeWindow`, invoking `active_session().toggle_maximize_active()` and ensuring terminal focus is preserved on idle loop.
+- `SessionAction::MaximizeToggle(id)` is handled in session action callbacks for both standard and Quake dropdown sessions.
+- "Maximize Terminal" / "Restore Terminal" is integrated dynamically into right-click context menus and into the window header bar hamburger menu (`app_menu`) alongside "Balance Layout".
+- Directional navigation (`focus_adjacent`) is explicitly guarded in both domain model and UI projection, returning `None` early while maximized to prevent desynchronization or accidental destruction of hidden background panes.
+- Pre-maximize ratio capture (`capture_layout_ratios`) executes prior to model mutation, guaranteeing that dynamic window resizing before maximization is accurately retained upon restore.
 
 
 

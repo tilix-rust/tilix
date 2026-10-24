@@ -16,6 +16,8 @@ pub struct SessionModel {
     pub pane_sync_overrides: HashMap<PaneId, bool>,
     #[serde(default)]
     pub focus_history: Vec<PaneId>,
+    #[serde(default)]
+    pub maximized_pane: Option<PaneId>,
     next_pane_id: u64,
 }
 
@@ -28,6 +30,7 @@ impl SessionModel {
             sync_input_enabled: false,
             pane_sync_overrides: HashMap::new(),
             focus_history: vec![initial_pane],
+            maximized_pane: None,
             next_pane_id: initial_pane.0 + 1,
         }
     }
@@ -40,6 +43,7 @@ impl SessionModel {
             sync_input_enabled: false,
             pane_sync_overrides: HashMap::new(),
             focus_history: vec![active_pane],
+            maximized_pane: None,
             next_pane_id,
         }
     }
@@ -75,6 +79,61 @@ impl SessionModel {
         }
     }
 
+    pub fn is_maximized(&self) -> bool {
+        self.maximized_pane.is_some()
+    }
+
+    pub fn maximized_pane(&self) -> Option<PaneId> {
+        self.maximized_pane
+    }
+
+    pub fn toggle_maximize(&mut self, target: Option<PaneId>) -> bool {
+        if self.layout.panes().len() <= 1 {
+            return false;
+        }
+
+        if let Some(current) = self.maximized_pane {
+            match target {
+                None => {
+                    self.maximized_pane = None;
+                    false
+                }
+                Some(id) if id == current => {
+                    self.maximized_pane = None;
+                    false
+                }
+                Some(id) => {
+                    if self.layout.contains(id) {
+                        self.maximized_pane = Some(id);
+                        self.set_active_pane(id);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        } else {
+            let candidate = target.or(self.active_pane);
+            if let Some(id) = candidate {
+                if self.layout.contains(id) {
+                    self.maximized_pane = Some(id);
+                    self.set_active_pane(id);
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
+    pub fn unmaximize(&mut self) -> bool {
+        if self.maximized_pane.is_some() {
+            self.maximized_pane = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn split_pane(
         &mut self,
         target: PaneId,
@@ -82,6 +141,7 @@ impl SessionModel {
     ) -> Result<PaneId, LayoutError> {
         let new_id = self.next_pane_id();
         self.layout.split(target, orientation, new_id)?;
+        self.maximized_pane = None;
         self.set_active_pane(new_id);
         Ok(new_id)
     }
@@ -99,6 +159,10 @@ impl SessionModel {
         self.sync_groups.remove(&id);
         self.pane_sync_overrides.remove(&id);
         self.focus_history.retain(|&p| p != id);
+
+        if self.maximized_pane == Some(id) || self.layout.panes().len() <= 1 {
+            self.maximized_pane = None;
+        }
 
         if self.active_pane == Some(id) {
             let next_focus = self
@@ -126,6 +190,7 @@ impl SessionModel {
         position: DockPosition,
     ) -> Result<(), LayoutError> {
         self.layout.dock_pane(source, target, position)?;
+        self.maximized_pane = None;
         self.set_active_pane(source);
         Ok(())
     }
@@ -140,11 +205,15 @@ impl SessionModel {
         if new_pane.0 >= self.next_pane_id {
             self.next_pane_id = new_pane.0 + 1;
         }
+        self.maximized_pane = None;
         self.set_active_pane(new_pane);
         Ok(())
     }
 
     pub fn focus_adjacent(&mut self, direction: Direction) -> Option<PaneId> {
+        if self.is_maximized() {
+            return None;
+        }
         let active = self.active_pane?;
         if let Some(adjacent) = self.layout.find_adjacent(active, direction) {
             self.set_active_pane(adjacent);
@@ -374,5 +443,172 @@ mod tests {
         assert_eq!(session.layout.panes(), vec![PaneId(99), PaneId(1)]);
         assert_eq!(session.active_pane, Some(PaneId(99)));
         assert!(session.next_pane_id().0 > 99);
+    }
+
+    #[test]
+    fn test_session_model_maximize_single_pane_noop() {
+        let mut session = SessionModel::new(PaneId(1));
+        assert!(!session.is_maximized());
+        assert_eq!(session.maximized_pane(), None);
+
+        // Maximize single pane should be a no-op
+        assert!(!session.toggle_maximize(None));
+        assert!(!session.is_maximized());
+        assert_eq!(session.maximized_pane(), None);
+
+        assert!(!session.toggle_maximize(Some(PaneId(1))));
+        assert!(!session.is_maximized());
+        assert_eq!(session.maximized_pane(), None);
+
+        assert!(!session.unmaximize());
+    }
+
+    #[test]
+    fn test_session_model_maximize_toggle_and_unmaximize() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        assert_eq!(session.active_pane, Some(p2));
+
+        // Maximize active pane (p2)
+        assert!(session.toggle_maximize(None));
+        assert!(session.is_maximized());
+        assert_eq!(session.maximized_pane(), Some(p2));
+
+        // Toggle again unmaximizes
+        assert!(!session.toggle_maximize(None));
+        assert!(!session.is_maximized());
+        assert_eq!(session.maximized_pane(), None);
+
+        // Maximize specific pane (p1)
+        assert!(session.toggle_maximize(Some(PaneId(1))));
+        assert!(session.is_maximized());
+        assert_eq!(session.maximized_pane(), Some(PaneId(1)));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+
+        // Unmaximize explicitly
+        assert!(session.unmaximize());
+        assert!(!session.is_maximized());
+        assert_eq!(session.maximized_pane(), None);
+        assert!(!session.unmaximize());
+    }
+
+    #[test]
+    fn test_session_model_maximize_switch_target() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        let p3 = session.split_active(SplitOrientation::Vertical).unwrap();
+        assert_eq!(session.layout.panes().len(), 3);
+
+        // Maximize pane 1
+        assert!(session.toggle_maximize(Some(PaneId(1))));
+        assert_eq!(session.maximized_pane(), Some(PaneId(1)));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+
+        // Switch maximize directly to pane 2
+        assert!(session.toggle_maximize(Some(p2)));
+        assert_eq!(session.maximized_pane(), Some(p2));
+        assert_eq!(session.active_pane, Some(p2));
+
+        // Switch maximize directly to pane 3
+        assert!(session.toggle_maximize(Some(p3)));
+        assert_eq!(session.maximized_pane(), Some(p3));
+        assert_eq!(session.active_pane, Some(p3));
+
+        // Switch to non-existent pane should fail and not switch
+        assert!(!session.toggle_maximize(Some(PaneId(999))));
+        assert_eq!(session.maximized_pane(), Some(p3));
+
+        // Toggle on same pane unmaximizes
+        assert!(!session.toggle_maximize(Some(p3)));
+        assert!(!session.is_maximized());
+        assert_eq!(session.maximized_pane(), None);
+    }
+
+    #[test]
+    fn test_session_model_maximize_split_auto_unmaximize() {
+        let mut session = SessionModel::new(PaneId(1));
+        let _p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+
+        assert!(session.toggle_maximize(Some(PaneId(1))));
+        assert!(session.is_maximized());
+
+        // Split active or target auto-unmaximizes
+        let p3 = session.split_pane(PaneId(1), SplitOrientation::Vertical).unwrap();
+        assert!(!session.is_maximized());
+        assert_eq!(session.maximized_pane(), None);
+        assert_eq!(session.active_pane, Some(p3));
+    }
+
+    #[test]
+    fn test_session_model_maximize_close_auto_unmaximize() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        let p3 = session.split_active(SplitOrientation::Vertical).unwrap();
+
+        // Maximize p3 and close it
+        assert!(session.toggle_maximize(Some(p3)));
+        assert!(session.is_maximized());
+        session.close_pane(p3).unwrap();
+        assert!(!session.is_maximized());
+        assert_eq!(session.maximized_pane(), None);
+
+        // Maximize p1 in 2-pane session
+        assert!(session.toggle_maximize(Some(PaneId(1))));
+        assert!(session.is_maximized());
+
+        // Close peer p2 -> leaves only 1 pane -> auto unmaximize
+        session.close_pane(p2).unwrap();
+        assert!(!session.is_maximized());
+        assert_eq!(session.maximized_pane(), None);
+    }
+
+    #[test]
+    fn test_session_model_maximize_serde_roundtrip() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        session.toggle_maximize(Some(p2));
+        assert_eq!(session.maximized_pane(), Some(p2));
+
+        let json = serde_json::to_string(&session).unwrap();
+        let deserialized: SessionModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.maximized_pane, Some(p2));
+        assert!(deserialized.is_maximized());
+
+        // Backward compatibility without maximized_pane
+        let legacy_json = r#"{
+            "layout": {"Leaf": 1},
+            "active_pane": 1,
+            "sync_groups": {},
+            "sync_input_enabled": false,
+            "pane_sync_overrides": {},
+            "focus_history": [1],
+            "next_pane_id": 2
+        }"#;
+        let legacy: SessionModel = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.maximized_pane, None);
+        assert!(!legacy.is_maximized());
+    }
+
+    #[test]
+    fn test_session_model_maximize_focus_adjacent_guard() {
+        let mut session = SessionModel::new(PaneId(1));
+        let p2 = session.split_active(SplitOrientation::Horizontal).unwrap();
+        // Currently p2 is active, p1 is left
+        assert_eq!(session.focus_adjacent(Direction::Left), Some(PaneId(1)));
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+
+        // Maximize pane 1
+        assert!(session.toggle_maximize(Some(PaneId(1))));
+        assert!(session.is_maximized());
+
+        // Attempting to focus adjacent right must be blocked (return None) and not change active_pane
+        assert_eq!(session.focus_adjacent(Direction::Right), None);
+        assert_eq!(session.active_pane, Some(PaneId(1)));
+        assert_eq!(session.maximized_pane(), Some(PaneId(1)));
+
+        // Once unmaximized, focus_adjacent works again
+        session.unmaximize();
+        assert_eq!(session.focus_adjacent(Direction::Right), Some(p2));
+        assert_eq!(session.active_pane, Some(p2));
     }
 }

@@ -25,6 +25,7 @@ type SyncToggleCallback = Box<dyn Fn(PaneId, bool)>;
 type BellCallback = Box<dyn Fn(PaneId)>;
 type ChildExitCallback = Box<dyn Fn(PaneId, i32)>;
 type DockCallback = Box<dyn Fn(PaneId, PaneId, DockPosition)>;
+type MaximizeToggleCallback = Box<dyn Fn(PaneId)>;
 
 pub const ZOOM_STEP: f64 = 0.1;
 pub const ZOOM_MIN: f64 = 0.2;
@@ -91,6 +92,7 @@ pub struct TerminalPane {
     sync_btn: gtk::ToggleButton,
     split_h_btn: gtk::Button,
     split_v_btn: gtk::Button,
+    maximize_btn: gtk::Button,
     close_btn: gtk::Button,
     terminal: vte::Terminal,
     font_scale: Rc<Cell<f64>>,
@@ -102,10 +104,12 @@ pub struct TerminalPane {
     pty_proxy: Rc<RefCell<Option<std::sync::Arc<crate::pty::PtyProxy>>>>,
     process_guard: Rc<ChildProcessGuard>,
     is_sync_enabled: Rc<Cell<bool>>,
+    is_maximized: Rc<Cell<bool>>,
     is_closing: Rc<Cell<bool>>,
     is_feeding: Rc<Cell<bool>>,
     close_callbacks: Rc<RefCell<Vec<CloseCallback>>>,
     split_callbacks: Rc<RefCell<Vec<SplitCallback>>>,
+    maximize_callbacks: Rc<RefCell<Vec<MaximizeToggleCallback>>>,
     focus_callbacks: Rc<RefCell<Vec<FocusCallback>>>,
     commit_callbacks: Rc<RefCell<Vec<CommitCallback>>>,
     title_callbacks: Rc<RefCell<Vec<TitleCallback>>>,
@@ -150,6 +154,11 @@ impl TerminalPane {
         split_v_btn.add_css_class("flat");
         split_v_btn.set_focusable(false);
 
+        let maximize_btn = gtk::Button::from_icon_name("view-fullscreen-symbolic");
+        maximize_btn.set_tooltip_text(Some("Maximize Terminal (Ctrl+Shift+X, Alt+M)"));
+        maximize_btn.add_css_class("flat");
+        maximize_btn.set_focusable(false);
+
         let close_btn = gtk::Button::from_icon_name("window-close-symbolic");
         close_btn.set_tooltip_text(Some("Close Pane (Ctrl+Shift+W)"));
         close_btn.add_css_class("flat");
@@ -158,6 +167,7 @@ impl TerminalPane {
         header.append(&sync_btn);
         header.append(&split_h_btn);
         header.append(&split_v_btn);
+        header.append(&maximize_btn);
         header.append(&close_btn);
 
         // Terminal widget & scrollbar in horizontal box
@@ -294,10 +304,12 @@ impl TerminalPane {
             Rc::clone(&pty_proxy),
         ));
         let is_sync_enabled = Rc::new(Cell::new(true));
+        let is_maximized = Rc::new(Cell::new(false));
         let is_closing = Rc::new(Cell::new(false));
         let is_feeding = Rc::new(Cell::new(false));
         let close_callbacks: Rc<RefCell<Vec<CloseCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let split_callbacks: Rc<RefCell<Vec<SplitCallback>>> = Rc::new(RefCell::new(Vec::new()));
+        let maximize_callbacks: Rc<RefCell<Vec<MaximizeToggleCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let focus_callbacks: Rc<RefCell<Vec<FocusCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let commit_callbacks: Rc<RefCell<Vec<CommitCallback>>> = Rc::new(RefCell::new(Vec::new()));
         let title_callbacks: Rc<RefCell<Vec<TitleCallback>>> = Rc::new(RefCell::new(Vec::new()));
@@ -359,6 +371,35 @@ impl TerminalPane {
                     }
                 }
             });
+        }
+
+        // Wire maximize button
+        {
+            let callbacks = Rc::clone(&maximize_callbacks);
+            maximize_btn.connect_clicked(move |_| {
+                if let Ok(list) = callbacks.try_borrow() {
+                    for cb in list.iter() {
+                        cb(pane_id);
+                    }
+                }
+            });
+        }
+
+        // Wire double-click gesture on header for maximize toggle
+        {
+            let header_click = gtk::GestureClick::new();
+            header_click.set_button(gtk::gdk::BUTTON_PRIMARY);
+            let callbacks = Rc::clone(&maximize_callbacks);
+            header_click.connect_pressed(move |_gesture, n_press, _x, _y| {
+                if n_press == 2 {
+                    if let Ok(list) = callbacks.try_borrow() {
+                        for cb in list.iter() {
+                            cb(pane_id);
+                        }
+                    }
+                }
+            });
+            header.add_controller(header_click);
         }
 
         // Wire child exit with exit action handling
@@ -553,6 +594,7 @@ impl TerminalPane {
 
             let term_ref = terminal.clone();
             let uri_holder = Rc::clone(&current_hyperlink_uri);
+            let is_max_rc = Rc::clone(&is_maximized);
 
             click_gesture.connect_pressed(move |gesture, _n, x, y| {
                 let btn = gesture.current_button();
@@ -565,13 +607,14 @@ impl TerminalPane {
                         gesture.set_state(gtk::EventSequenceState::Claimed);
                     }
                 } else if btn == gtk::gdk::BUTTON_SECONDARY {
+                    let is_max = is_max_rc.get();
                     if let Some(uri) = term_ref.check_hyperlink_at(x, y) {
                         *uri_holder.borrow_mut() = Some(uri.to_string());
-                        let menu = Self::build_context_menu(true);
+                        let menu = Self::build_context_menu_with_state(true, is_max);
                         term_ref.set_context_menu_model(Some(&menu));
                     } else {
                         *uri_holder.borrow_mut() = None;
-                        let menu = Self::build_context_menu(false);
+                        let menu = Self::build_context_menu_with_state(false, is_max);
                         term_ref.set_context_menu_model(Some(&menu));
                     }
                 }
@@ -719,6 +762,7 @@ impl TerminalPane {
             sync_btn,
             split_h_btn,
             split_v_btn,
+            maximize_btn,
             close_btn,
             terminal,
             font_scale,
@@ -730,10 +774,12 @@ impl TerminalPane {
             pty_proxy,
             process_guard,
             is_sync_enabled,
+            is_maximized,
             is_closing,
             is_feeding,
             close_callbacks,
             split_callbacks,
+            maximize_callbacks,
             focus_callbacks,
             commit_callbacks,
             title_callbacks,
@@ -1363,7 +1409,7 @@ impl TerminalPane {
         res.is_ok()
     }
 
-    pub fn build_context_menu(has_link: bool) -> gio::Menu {
+    pub fn build_context_menu_with_state(has_link: bool, is_maximized: bool) -> gio::Menu {
         let menu = gio::Menu::new();
 
         if has_link {
@@ -1388,6 +1434,12 @@ impl TerminalPane {
         split_section.append(Some("Split Right"), Some("win.split-right"));
         split_section.append(Some("Split Down"), Some("win.split-down"));
         split_section.append(Some("Close Terminal"), Some("win.close-pane"));
+        let max_label = if is_maximized {
+            "Restore Terminal"
+        } else {
+            "Maximize Terminal"
+        };
+        split_section.append(Some(max_label), Some("win.terminal-maximize"));
         menu.append_section(None, &split_section);
 
         let pref_section = gio::Menu::new();
@@ -1395,6 +1447,10 @@ impl TerminalPane {
         menu.append_section(None, &pref_section);
 
         menu
+    }
+
+    pub fn build_context_menu(has_link: bool) -> gio::Menu {
+        Self::build_context_menu_with_state(has_link, false)
     }
 
     pub fn allows_hyperlink(&self) -> bool {
@@ -1451,6 +1507,38 @@ impl TerminalPane {
 
     pub fn connect_sync_toggled<F: Fn(PaneId, bool) + 'static>(&self, f: F) {
         self.sync_toggled_callbacks.borrow_mut().push(Box::new(f));
+    }
+
+    pub fn connect_maximize_toggle<F: Fn(PaneId) + 'static>(&self, f: F) {
+        self.maximize_callbacks.borrow_mut().push(Box::new(f));
+    }
+
+    pub fn is_maximized(&self) -> bool {
+        self.is_maximized.get()
+    }
+
+    pub fn set_maximized(&self, maximized: bool) {
+        self.is_maximized.set(maximized);
+        if maximized {
+            self.maximize_btn.set_icon_name("view-restore-symbolic");
+            self.maximize_btn.set_tooltip_text(Some("Restore Terminal (Ctrl+Shift+X, Alt+M)"));
+            self.maximize_btn.add_css_class("maximized");
+        } else {
+            self.maximize_btn.set_icon_name("view-fullscreen-symbolic");
+            self.maximize_btn.set_tooltip_text(Some("Maximize Terminal (Ctrl+Shift+X, Alt+M)"));
+            self.maximize_btn.remove_css_class("maximized");
+        }
+        let has_link = self.current_hyperlink_uri.borrow().is_some();
+        let menu = Self::build_context_menu_with_state(has_link, maximized);
+        self.terminal.set_context_menu_model(Some(&menu));
+    }
+
+    pub fn set_maximize_sensitive(&self, sensitive: bool) {
+        self.maximize_btn.set_sensitive(sensitive);
+    }
+
+    pub fn maximize_button(&self) -> &gtk::Button {
+        &self.maximize_btn
     }
 
     pub fn apply_color_scheme(&self, scheme: &ColorScheme) {
@@ -1844,6 +1932,7 @@ impl TerminalPane {
     pub fn clear_callbacks(&self) {
         self.close_callbacks.borrow_mut().clear();
         self.split_callbacks.borrow_mut().clear();
+        self.maximize_callbacks.borrow_mut().clear();
         self.focus_callbacks.borrow_mut().clear();
         self.commit_callbacks.borrow_mut().clear();
         self.title_callbacks.borrow_mut().clear();
@@ -2125,6 +2214,44 @@ mod tests {
             // But emitting commit directly (as user typing) DOES trigger commit callbacks
             pane.terminal().emit_by_name::<()>("commit", &[&"user typed", &10u32]);
             assert_eq!(*commits.borrow(), vec!["user typed".to_string()]);
+
+            pane.close();
+        });
+    }
+
+    #[test]
+    fn test_terminal_pane_maximize_state_toggle() {
+        crate::ui::window::run_gtk_test(|| {
+            let pane = TerminalPane::new(PaneId(42), None);
+            assert!(!pane.is_maximized());
+            assert_eq!(pane.maximize_button().icon_name().as_deref(), Some("view-fullscreen-symbolic"));
+
+            let toggles = Rc::new(RefCell::new(Vec::new()));
+            {
+                let toggles = Rc::clone(&toggles);
+                pane.connect_maximize_toggle(move |id| {
+                    toggles.borrow_mut().push(id);
+                });
+            }
+
+            // Clicking maximize button emits toggle callback
+            pane.maximize_button().emit_clicked();
+            assert_eq!(*toggles.borrow(), vec![PaneId(42)]);
+
+            // Updating maximized state alters icon and state
+            pane.set_maximized(true);
+            assert!(pane.is_maximized());
+            assert_eq!(pane.maximize_button().icon_name().as_deref(), Some("view-restore-symbolic"));
+
+            pane.set_maximized(false);
+            assert!(!pane.is_maximized());
+            assert_eq!(pane.maximize_button().icon_name().as_deref(), Some("view-fullscreen-symbolic"));
+
+            // Sensitivity toggle
+            pane.set_maximize_sensitive(false);
+            assert!(!pane.maximize_button().is_sensitive());
+            pane.set_maximize_sensitive(true);
+            assert!(pane.maximize_button().is_sensitive());
 
             pane.close();
         });

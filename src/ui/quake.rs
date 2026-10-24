@@ -109,6 +109,18 @@ impl TilixQuakeWindow {
             window.add_action(&action);
         }
 
+        {
+            let s_weak = Rc::downgrade(&session_view);
+            let action = gio::SimpleAction::new("terminal-maximize", None);
+            action.connect_activate(move |_, _| {
+                if let Some(session) = s_weak.upgrade() {
+                    session.borrow().toggle_maximize_active();
+                    session.borrow().grab_focus();
+                }
+            });
+            window.add_action(&action);
+        }
+
         let session_weak = Rc::downgrade(&session_view);
         let window_weak = window.downgrade();
         let is_closed_action = is_closed.clone();
@@ -134,6 +146,9 @@ impl TilixQuakeWindow {
                     }
                     SessionAction::Focus(id) => {
                         session.borrow_mut().set_active_pane(id);
+                    }
+                    SessionAction::MaximizeToggle(id) => {
+                        session.borrow().toggle_maximize(Some(id));
                     }
                 }
             });

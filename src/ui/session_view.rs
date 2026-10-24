@@ -19,6 +19,7 @@ pub enum SessionAction {
     Split(PaneId, SplitOrientation),
     Close(PaneId),
     Focus(PaneId),
+    MaximizeToggle(PaneId),
 }
 
 pub type ActionHandler = Box<dyn Fn(SessionAction)>;
@@ -246,6 +247,15 @@ impl SessionView {
             if let Ok(h) = handler_split.try_borrow() {
                 if let Some(cb) = h.as_ref() {
                     cb(SessionAction::Split(p_id, orient));
+                }
+            }
+        });
+
+        let handler_maximize = Rc::clone(action_handler);
+        pane.connect_maximize_toggle(move |p_id| {
+            if let Ok(h) = handler_maximize.try_borrow() {
+                if let Some(cb) = h.as_ref() {
+                    cb(SessionAction::MaximizeToggle(p_id));
                 }
             }
         });
@@ -877,6 +887,9 @@ impl SessionView {
     }
 
     pub fn focus_adjacent(&self, direction: Direction) {
+        if self.is_maximized() {
+            return;
+        }
         let adjacent = self.model.borrow_mut().focus_adjacent(direction);
         if let Some(target) = adjacent {
             self.set_active_pane(target);
@@ -945,10 +958,13 @@ impl SessionView {
         let count = self.pane_count();
         let style = *self.pane_title_style.borrow();
         let show_single = *self.pane_title_show_when_single.borrow();
+        let is_maximized = self.model.borrow().is_maximized();
         let visible = match style {
             PaneTitleStyle::None => false,
             PaneTitleStyle::Normal => {
-                if count <= 1 {
+                if is_maximized {
+                    true
+                } else if count <= 1 {
                     show_single
                 } else {
                     true
@@ -957,6 +973,7 @@ impl SessionView {
         };
         for pane in self.panes.borrow().values() {
             pane.set_header_visible(visible);
+            pane.set_maximize_sensitive(count > 1 || is_maximized);
         }
     }
 
@@ -987,6 +1004,9 @@ impl SessionView {
     }
 
     pub fn capture_layout_ratios(&self) {
+        if self.model.borrow().is_maximized() {
+            return;
+        }
         if let Some(root_widget) = self.container.first_child() {
             if let Ok(mut m) = self.model.try_borrow_mut() {
                 if let Some(root_node) = m.layout.root_mut() {
@@ -1574,10 +1594,12 @@ impl SessionView {
         model: &Rc<RefCell<SessionModel>>,
         wide_handle: bool,
     ) {
-        if let Some(root_widget) = container.first_child() {
-            if let Ok(mut m) = model.try_borrow_mut() {
-                if let Some(root_node) = m.layout.root_mut() {
-                    Self::capture_ratios_recursive(root_node, &root_widget);
+        if !model.borrow().is_maximized() {
+            if let Some(root_widget) = container.first_child() {
+                if let Ok(mut m) = model.try_borrow_mut() {
+                    if let Some(root_node) = m.layout.root_mut() {
+                        Self::capture_ratios_recursive(root_node, &root_widget);
+                    }
                 }
             }
         }
@@ -1593,26 +1615,35 @@ impl SessionView {
         }
 
         let model_b = model.borrow();
-        let Some(root_node) = model_b.layout.root() else {
-            return;
-        };
-
-        let avail_w = container.width();
-        let avail_h = container.height();
-        let root_widget = Self::build_node(root_node, &panes_b, model, container, wide_handle, avail_w, avail_h);
-        root_widget.set_vexpand(true);
-        root_widget.set_hexpand(true);
-        container.append(&root_widget);
-
+        let max_pane_id = model_b.maximized_pane;
         let active_id = model_b.active_pane;
+
+        if let Some(max_id) = max_pane_id {
+            if let Some(pane) = panes_b.get(&max_id) {
+                let w = pane.widget();
+                w.set_vexpand(true);
+                w.set_hexpand(true);
+                container.append(w);
+            }
+        } else if let Some(root_node) = model_b.layout.root() {
+            let avail_w = container.width();
+            let avail_h = container.height();
+            let root_widget = Self::build_node(root_node, &panes_b, model, container, wide_handle, avail_w, avail_h);
+            root_widget.set_vexpand(true);
+            root_widget.set_hexpand(true);
+            container.append(&root_widget);
+        }
+
         drop(model_b);
         drop(panes_b);
 
         let panes_ref = panes.borrow();
         for (pane_id, pane) in panes_ref.iter() {
             pane.set_active(Some(*pane_id) == active_id);
+            pane.set_maximized(Some(*pane_id) == max_pane_id);
         }
-        if let Some(id) = active_id {
+        let focus_target = max_pane_id.or(active_id);
+        if let Some(id) = focus_target {
             if let Some(pane) = panes_ref.get(&id) {
                 pane.grab_focus();
             }
@@ -1627,6 +1658,32 @@ impl SessionView {
             *self.use_wide_handle.borrow(),
         );
         self.update_pane_headers_visibility();
+    }
+
+    pub fn is_maximized(&self) -> bool {
+        self.model.borrow().is_maximized()
+    }
+
+    pub fn toggle_maximize(&self, target: Option<PaneId>) -> bool {
+        if !self.is_maximized() {
+            self.capture_layout_ratios();
+        }
+        let res = self.model.borrow_mut().toggle_maximize(target);
+        self.rebuild_projection();
+        res
+    }
+
+    pub fn toggle_maximize_active(&self) -> bool {
+        let active = self.model.borrow().active_pane;
+        self.toggle_maximize(active)
+    }
+
+    pub fn unmaximize(&self) -> bool {
+        let res = self.model.borrow_mut().unmaximize();
+        if res {
+            self.rebuild_projection();
+        }
+        res
     }
 
     pub fn has_transparent_pane(&self) -> bool {

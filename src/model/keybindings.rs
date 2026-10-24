@@ -138,7 +138,7 @@ pub static ACTION_CATALOG: &[ActionShortcutDef] = &[
         category: ActionCategory::SessionAndTabs,
         default_accels: &["<Alt>9"],
     },
-    // Splits & Layout (4 actions)
+    // Splits & Layout (5 actions)
     ActionShortcutDef {
         id: "win.split-right",
         title: "Split Right",
@@ -166,6 +166,13 @@ pub static ACTION_CATALOG: &[ActionShortcutDef] = &[
         description: "Broadcast keystrokes to all terminal panes in tab",
         category: ActionCategory::SplitsAndLayout,
         default_accels: &["<Primary><Shift>i"],
+    },
+    ActionShortcutDef {
+        id: "win.terminal-maximize",
+        title: "Maximize Terminal",
+        description: "Toggle maximize active terminal pane",
+        category: ActionCategory::SplitsAndLayout,
+        default_accels: &["<Primary><Shift>x", "<Alt>m"],
     },
     // Navigation (4 actions)
     ActionShortcutDef {
@@ -486,10 +493,10 @@ mod tests {
 
     #[test]
     fn test_action_catalog_completeness() {
-        assert_eq!(ACTION_CATALOG.len(), 33);
+        assert_eq!(ACTION_CATALOG.len(), 34);
         let ids: std::collections::HashSet<&str> =
             ACTION_CATALOG.iter().map(|d| d.id).collect();
-        assert_eq!(ids.len(), 33);
+        assert_eq!(ids.len(), 34);
         assert!(ids.contains(&"win.new-tab"));
         assert!(ids.contains(&"win.close-pane"));
         assert!(ids.contains(&"win.close-tab"));
@@ -499,6 +506,7 @@ mod tests {
         assert!(ids.contains(&"win.split-down"));
         assert!(ids.contains(&"win.balance-layout"));
         assert!(ids.contains(&"win.toggle-sync-input"));
+        assert!(ids.contains(&"win.terminal-maximize"));
         assert!(ids.contains(&"app.quake-toggle"));
         assert!(ids.contains(&"win.preferences"));
         assert!(ids.contains(&"win.focus-up"));

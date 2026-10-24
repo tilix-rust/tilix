@@ -717,6 +717,7 @@ impl TilixWindow {
         let app_menu = gio::Menu::new();
         app_menu.append(Some("Quake"), Some("win.quake-toggle"));
         app_menu.append(Some("Balance Layout"), Some("win.balance-layout"));
+        app_menu.append(Some("Maximize Terminal"), Some("win.terminal-maximize"));
         app_menu.append(Some("Preferences"), Some("win.preferences"));
         app_menu.append(Some("Save Layout..."), Some("win.save-layout"));
         app_menu.append(Some("Shortcuts"), Some("win.shortcuts"));
@@ -989,6 +990,9 @@ impl TilixWindow {
                     SessionAction::Focus(id) => {
                         session.borrow().set_active_pane(id);
                     }
+                    SessionAction::MaximizeToggle(id) => {
+                        session.borrow().toggle_maximize(Some(id));
+                    }
                 }
             });
         });
@@ -1150,6 +1154,9 @@ impl TilixWindow {
                     }
                     SessionAction::Focus(id) => {
                         session.borrow().set_active_pane(id);
+                    }
+                    SessionAction::MaximizeToggle(id) => {
+                        session.borrow().toggle_maximize(Some(id));
                     }
                 }
             });
@@ -1431,6 +1438,29 @@ impl TilixWindow {
                 let session_opt = sessions.borrow().get(&page).cloned();
                 if let Some(session) = session_opt {
                     session.borrow().balance_layout();
+                    session.borrow().grab_focus();
+                    let s_weak = Rc::downgrade(&session);
+                    glib::idle_add_local_once(move || {
+                        if let Some(s) = s_weak.upgrade() {
+                            s.borrow().grab_focus();
+                        }
+                    });
+                }
+            });
+            self.window.add_action(&action);
+        }
+
+        // Terminal Maximize Toggle
+        {
+            let action = gio::SimpleAction::new("terminal-maximize", None);
+            let tab_view_weak = self.tab_view.downgrade();
+            let sessions = Rc::clone(&self.sessions);
+            action.connect_activate(move |_, _| {
+                let Some(tv) = tab_view_weak.upgrade() else { return; };
+                let Some(page) = tv.selected_page() else { return; };
+                let session_opt = sessions.borrow().get(&page).cloned();
+                if let Some(session) = session_opt {
+                    session.borrow().toggle_maximize_active();
                     session.borrow().grab_focus();
                     let s_weak = Rc::downgrade(&session);
                     glib::idle_add_local_once(move || {
